@@ -326,7 +326,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 sid=int(obj.get('metadata',{}).get('shop_id','0') or 0); stripe_sub=obj.get('subscription'); status='active' if obj.get('payment_status')=='paid' else 'incomplete'
                 if sid:c.execute('UPDATE subscriptions SET status=?,stripe_customer_id=?,stripe_subscription_id=? WHERE shop_id=?',(status,obj.get('customer'),stripe_sub,sid))
             elif typ.startswith('customer.subscription.') or typ.startswith('invoice.payment_'):
-                stripe_sub=obj.get('id') if typ.startswith('customer.subscription.') else obj.get('subscription'); status=obj.get('status','active'); paid_until=datetime.fromtimestamp(obj.get('current_period_end',0),timezone.utc).isoformat() if obj.get('current_period_end') else None
+                stripe_sub=obj.get('id') if typ.startswith('customer.subscription.') else obj.get('subscription'); status=('active' if typ=='invoice.payment_succeeded' else obj.get('status','active')); paid_until=datetime.fromtimestamp(obj.get('current_period_end',0),timezone.utc).isoformat() if obj.get('current_period_end') else None
                 if typ=='invoice.payment_failed':status='past_due'
                 cur=c.execute('UPDATE subscriptions SET status=?,stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=COALESCE(?,stripe_subscription_id),paid_until=COALESCE(?,paid_until) WHERE stripe_subscription_id=?',(status,obj.get('customer'),stripe_sub,paid_until,stripe_sub))
                 if cur.rowcount==0 and obj.get('metadata',{}).get('shop_id'):
