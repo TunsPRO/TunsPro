@@ -315,11 +315,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def stripe_webhook(self):
         raw=self.rfile.read(int(self.headers.get('Content-Length','0')));secret=os.environ.get('STRIPE_WEBHOOK_SECRET','');sig=self.headers.get('Stripe-Signature','')
         if not secret:return self.json_response(503,{'error':'Webhook Stripe neconfigurat.'})
-        parts=dict(x.strip().split('=',1) for x in sig.split(',') if '=' in x);expected=hmac.new(secret.encode(),(parts.get('t','')+'.').encode()+raw,hashlib.sha256).hexdigest()
+        parts=[x.strip().split('=',1) for x in sig.split(',') if '=' in x]
+        timestamp=next((value for key,value in parts if key=='t'),'0')
+        signatures=[value for key,value in parts if key=='v1']
+        expected=hmac.new(secret.encode(),(timestamp+'.').encode()+raw,hashlib.sha256).hexdigest()
         # Stripe signs timestamp + dot + raw body.
-        try: fresh=abs(datetime.now().timestamp()-int(parts.get('t','0')))<300
+        try: fresh=abs(datetime.now().timestamp()-int(timestamp))<300
         except ValueError:fresh=False
-        if not fresh or not hmac.compare_digest(expected,parts.get('v1','')):return self.json_response(400,{'error':'Semnătură invalidă.'})
+        if not fresh or not any(hmac.compare_digest(expected,candidate) for candidate in signatures):return self.json_response(400,{'error':'Semnătură invalidă.'})
         event=json.loads(raw); obj=event.get('data',{}).get('object',{}); typ=event.get('type','')
         with connect() as c:
             if typ=='checkout.session.completed' and obj.get('mode')=='subscription':
