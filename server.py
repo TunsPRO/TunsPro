@@ -497,19 +497,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('INSERT INTO password_reset_limits(email_hash,requested) VALUES(?,?) ON CONFLICT(email_hash) DO UPDATE SET requested=excluded.requested',(email_hash,now.isoformat()))
             if allowed:
                 user=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
-                mail_ready=bool(os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM') and os.environ.get('PUBLIC_URL'))
+                mail_ready=all(os.environ.get(key) for key in ('SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASSWORD','SMTP_FROM','PUBLIC_URL'))
+                print(f'Password reset request received: barber_account_match={bool(user)} smtp_config_complete={mail_ready}',flush=True)
                 if user and mail_ready:
                     user_id=user['id'];token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(token.encode()).hexdigest()
                     c.execute('DELETE FROM password_resets WHERE user_id=? OR expires<=?',(user_id,now.isoformat()))
                     c.execute('INSERT INTO password_resets(token_hash,user_id,expires,created) VALUES(?,?,?,?)',(token_hash,user_id,(now+timedelta(minutes=30)).isoformat(),now.isoformat()))
+            else:
+                print('Password reset request suppressed: rate limit',flush=True)
         if user_id:
             reset_url=os.environ['PUBLIC_URL'].rstrip('/')+'/#resetare-parola/'+token
             threading.Thread(target=self.send_password_reset_email,args=(email,reset_url),daemon=True).start()
         return self.json_response(200,generic)
     @staticmethod
     def send_password_reset_email(email,reset_url):
-        try:smtp_notice(email,'Resetarea parolei TunsPro',f'Am primit o cerere de resetare a parolei contului tău TunsPro. Deschide linkul în următoarele 30 de minute pentru a alege o parolă nouă:\n\n{reset_url}\n\nDacă nu ai solicitat resetarea, ignoră acest mesaj. Parola nu se schimbă până când nu confirmi linkul.')
-        except Exception as e:print('Password reset email failed:',repr(e))
+        try:
+            smtp_notice(email,'Resetarea parolei TunsPro',f'Am primit o cerere de resetare a parolei contului tău TunsPro. Deschide linkul în următoarele 30 de minute pentru a alege o parolă nouă:\n\n{reset_url}\n\nDacă nu ai solicitat resetarea, ignoră acest mesaj. Parola nu se schimbă până când nu confirmi linkul.')
+            print('Password reset email accepted by SMTP server',flush=True)
+        except Exception as e:
+            print(f'Password reset email failed: {type(e).__name__}: {e}',flush=True)
     def confirm_password_reset(self,d):
         token=str(d.get('token','')).strip();password=str(d.get('password',''))
         if len(token)<30:return self.json_response(400,{'error':'Linkul de resetare nu este valid sau a expirat. Cere un link nou.'})
