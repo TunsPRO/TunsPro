@@ -1,6 +1,6 @@
 """TunsPro MVP API. Python standard library + SQLite; Stripe/SMTP/Twilio are optional via .env."""
 from __future__ import annotations
-import hashlib, hmac, http.server, json, os, secrets, smtplib, sqlite3, ssl, urllib.parse, urllib.request
+import base64, hashlib, hmac, http.server, json, os, re, secrets, smtplib, sqlite3, ssl, urllib.parse, urllib.request, uuid
 import unicodedata
 import threading
 from datetime import date, datetime, time, timedelta, timezone
@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('TUNSPRO_DB', ROOT / 'tunspro.sqlite3'))
+MEDIA_DIR = DB_PATH.parent / 'uploads'
 PORT = int(os.environ.get('PORT', '8765'))
 TZ = ZoneInfo('Europe/Bucharest')
 PRICE = 4900
@@ -34,15 +35,18 @@ def init_db():
     with connect() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}');
-        CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
         CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE);
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(shop_id INTEGER PRIMARY KEY REFERENCES shops(id) ON DELETE CASCADE, notification_email INTEGER NOT NULL DEFAULT 1, notification_sms INTEGER NOT NULL DEFAULT 0);
         ''')
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0')]:
+            if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
     anonymize_old_bookings()
 
 def anonymize_old_bookings():
@@ -55,6 +59,28 @@ def anonymization_loop():
         threading.Event().wait(24*60*60)
         try: anonymize_old_bookings()
         except Exception as e: print('Booking anonymization failed:',repr(e))
+
+def send_due_reminders():
+    with connect() as c:
+        rows=c.execute("SELECT b.*,sh.name shop_name,sh.address,sh.city,sh.phone shop_phone,s.name service_name,t.name staff_name,COALESCE(cfg.notification_email,1) notification_email,COALESCE(cfg.notification_sms,0) notification_sms FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id LEFT JOIN settings cfg ON cfg.shop_id=sh.id WHERE b.status='confirmed' AND b.reminder_sent=0 AND b.reminder_at IS NOT NULL AND julianday(b.reminder_at)<=julianday(?) AND julianday(b.starts)>julianday(?)",(iso_now(),iso_now())).fetchall()
+    for row in rows:
+        when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
+        body=f'Reamintire TunsPro: ai programare la {row["shop_name"]} pe {when}, pentru {row["service_name"]} cu {row["staff_name"]}. Adresă: {row["address"]}, {row["city"]}.'
+        attempted=False
+        if row['notification_email'] and row['email'] and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(row['email'],f'Reamintire programare — {row["shop_name"]}',body);attempted=True
+            except Exception as e:print('Email reminder failed:',repr(e))
+        if row['notification_sms'] and row['phone'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(row['phone'],body);attempted=True
+            except Exception as e:print('SMS reminder failed:',repr(e))
+        if attempted:
+            with connect() as c:c.execute('UPDATE bookings SET reminder_sent=1 WHERE id=? AND reminder_sent=0',(row['id'],))
+
+def reminder_loop():
+    while True:
+        try:send_due_reminders()
+        except Exception as e:print('Booking reminder worker failed:',repr(e))
+        threading.Event().wait(5*60)
 
 def now_utc(): return datetime.now(timezone.utc)
 def iso_now(): return now_utc().isoformat()
@@ -83,7 +109,7 @@ def shop_public(c, shop):
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     team = c.execute('SELECT id,name,role FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
-    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'services':[dict(x) for x in svc],'team':[dict(x) for x in team]}
+    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'services':[dict(x) for x in svc],'team':[dict(x) for x in team]}
 
 def smtp_notice(to_email, subject, body):
     host=os.environ.get('SMTP_HOST'); sender=os.environ.get('SMTP_FROM');
@@ -113,7 +139,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
     def body_json(self):
         n=int(self.headers.get('Content-Length','0'))
-        if n>1000000: raise ValueError('Cerere prea mare.')
+        if n>2200000: raise ValueError('Cerere prea mare.')
         return json.loads(self.rfile.read(n) or b'{}')
     def auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_session'].value if 'tunspro_session' in jar else ''
@@ -127,6 +153,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def clear_session(self): return {'Set-Cookie':'tunspro_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'}
     def get(self):
         u=urllib.parse.urlparse(self.path); path=urllib.parse.unquote(u.path); q=urllib.parse.parse_qs(u.query)
+        if path.startswith('/media/'):
+            name=path.rsplit('/',1)[-1]
+            if not re.fullmatch(r'[0-9a-f]{32}\.(?:jpg|png|webp)',name):return self.send_error(404)
+            file=MEDIA_DIR/name
+            if not file.is_file():return self.send_error(404)
+            mime={'jpg':'image/jpeg','png':'image/png','webp':'image/webp'}[name.rsplit('.',1)[1]]
+            body=file.read_bytes();self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=31536000, immutable');self.end_headers();self.wfile.write(body);return
         if path=='/api/me':
             with connect() as c:
                 user=self.auth(c)
@@ -194,6 +227,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if user:c.execute('DELETE FROM sessions WHERE user_id=?',(user['id'],))
                 return self.json_response(200,{'ok':True},self.clear_session())
             if path=='/api/public/bookings':return self.create_booking(self.body_json())
+            if path=='/api/manage/photos':return self.upload_photo(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
             if path=='/api/billing/checkout':return self.checkout()
             if path=='/api/webhooks/stripe':return self.stripe_webhook()
@@ -212,7 +246,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 sid=user['shop_id']
                 if path=='/api/manage/shop':
                     fields={k:data[k] for k in ('name','city','address','phone','tagline') if k in data}
+                    removed_photos=[]
+                    if 'photos' in data:
+                        photos=data['photos']
+                        if not isinstance(photos,list) or len(photos)>8 or any(not isinstance(x,str) or not re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',x) for x in photos):return self.json_response(400,{'error':'Verifică fotografiile selectate.'})
+                        current=c.execute('SELECT photos FROM shops WHERE id=?',(sid,)).fetchone()
+                        removed_photos=set(json.loads(current['photos'] or '[]'))-set(photos)
+                        fields['photos']=json.dumps(photos)
                     if fields:c.execute('UPDATE shops SET '+','.join(f'{k}=?' for k in fields)+' WHERE id=?',(*fields.values(),sid))
+                    for url in removed_photos:
+                        name=url.rsplit('/',1)[-1]
+                        if re.fullmatch(r'[0-9a-f]{32}\.(?:jpg|png|webp)',name):(MEDIA_DIR/name).unlink(missing_ok=True)
                 elif path=='/api/manage/services':
                     ids=[]
                     for x in data.get('services',[]):
@@ -259,6 +303,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             sched={str(i):['09:00','19:00'] for i in range(6)}
             c.execute('INSERT INTO staff(shop_id,name,role,weekly_schedule) VALUES(?,?,?,?)',(sid,d['owner'].strip(),'Frizer',json.dumps(sched)))
         return self.json_response(201,{'ok':True,'slug':slug},self.set_session(uid))
+    def upload_photo(self,d):
+        with connect() as c:
+            user=self.auth(c)
+            if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
+        data=str(d.get('data',''))
+        match=re.fullmatch(r'data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]+=*)',data)
+        if not match:raise ValueError('Încarcă o fotografie JPG, PNG sau WebP.')
+        raw=base64.b64decode(match.group(2),validate=True)
+        if not raw or len(raw)>1_500_000:raise ValueError('Fotografia trebuie să aibă maximum 1,5 MB după comprimare.')
+        ext={'jpeg':'jpg','png':'png','webp':'webp'}[match.group(1)]
+        signatures={'jpg':raw.startswith(b'\xff\xd8\xff'),'png':raw.startswith(b'\x89PNG\r\n\x1a\n'),'webp':len(raw)>12 and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP'}
+        if not signatures[ext]:raise ValueError('Fișierul nu pare a fi o imagine validă.')
+        name=uuid.uuid4().hex+'.'+ext;MEDIA_DIR.mkdir(parents=True,exist_ok=True);(MEDIA_DIR/name).write_bytes(raw);url='/media/'+name
+        with connect() as c:
+            shop=c.execute('SELECT photos FROM shops WHERE user_id=?',(user['id'],)).fetchone();photos=json.loads(shop['photos'] or '[]')
+            if len(photos)>=8:
+                (MEDIA_DIR/name).unlink(missing_ok=True)
+                raise ValueError('Poți adăuga maximum 8 fotografii.')
+            photos.append(url);c.execute('UPDATE shops SET photos=? WHERE user_id=?',(json.dumps(photos),user['id']))
+        return self.json_response(201,{'ok':True,'url':url,'photos':photos})
     def login(self,d):
         with connect() as c:
             user=c.execute('SELECT * FROM users WHERE email=?',(str(d.get('email','')).lower().strip(),)).fetchone()
@@ -279,7 +343,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):raise ValueError('Ora aleasă este în afara programului frizerului.')
             collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status='confirmed' AND starts<? AND ends>?",(staff['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:raise ValueError('Ora tocmai a fost rezervată. Alege alt interval.')
-            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],str(d.get('client','')).strip(),str(d.get('phone','')).strip(),str(d.get('email','')).strip(),starts.isoformat(),finish.isoformat(),'confirmed',iso_now())); booking_id=cur.lastrowid
+            current=now_utc();reminder_at=starts-timedelta(hours=24);reminder_sent=0
+            if reminder_at<=current:
+                if starts>current+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
+                else:reminder_sent=1
+            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],str(d.get('client','')).strip(),str(d.get('phone','')).strip(),str(d.get('email','')).strip(),starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent)); booking_id=cur.lastrowid
             opts=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone(); owner=c.execute('SELECT u.email FROM users u WHERE u.id=?',(shop['user_id'],)).fetchone()
         when=starts.strftime('%A %d %B, %H:%M')
         if opts and opts['notification_email']:
@@ -352,5 +420,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 if __name__=='__main__':
     init_db()
     threading.Thread(target=anonymization_loop,daemon=True).start()
+    threading.Thread(target=reminder_loop,daemon=True).start()
     print(f'TunsPro running at http://localhost:{PORT}')
     http.server.ThreadingHTTPServer(('0.0.0.0',PORT),Handler).serve_forever()
