@@ -116,6 +116,13 @@ def slugify(s):
     s = ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
     return re.sub(r'-+', '-', re.sub(r'[^a-z0-9]+', '-', s)).strip('-')[:55] or 'frizerie'
 def search_norm(s): return ''.join(ch for ch in unicodedata.normalize('NFD',str(s)) if not unicodedata.combining(ch)).lower()
+def stripe_subscription_details(subscription_id):
+    key=os.environ.get('STRIPE_SECRET_KEY')
+    if not key or not subscription_id:return None
+    req=urllib.request.Request(f'https://api.stripe.com/v1/subscriptions/{urllib.parse.quote(str(subscription_id), safe="")}')
+    req.add_header('Authorization','Bearer '+key)
+    return json.loads(urllib.request.urlopen(req,timeout=20).read())
+
 def active_subscription(row):
     if not row or row['plan'] not in PLAN_PRICES or row['status'] not in ('active', 'trialing') or not row['paid_until']: return False
     try: return datetime.fromisoformat(row['paid_until'].replace('Z', '+00:00')) > now_utc()
@@ -276,6 +283,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone()
                 if path=='/api/manage/dashboard':
                     svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('confirmed','completed') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
+                    if sub and sub['plan'] in PLAN_PRICES and sub['status'] in ('active','trialing') and not sub['paid_until'] and sub['stripe_subscription_id']:
+                        try:
+                            details=stripe_subscription_details(sub['stripe_subscription_id'])
+                            if details and details.get('current_period_end'):
+                                paid_until=datetime.fromtimestamp(details['current_period_end'],timezone.utc).isoformat()
+                                c.execute('UPDATE subscriptions SET status=?,paid_until=? WHERE shop_id=?',(details.get('status',sub['status']),paid_until,shop['id']))
+                                sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone()
+                        except Exception as e:print('Stripe subscription reconciliation failed:',repr(e))
                     paid=active_subscription(sub)
                     return self.json_response(200,{'shop':dict(shop,photos=json.loads(shop['photos'] or '[]')),'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
@@ -588,7 +603,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c:
             if typ=='checkout.session.completed' and obj.get('mode')=='subscription':
                 sid=int(obj.get('metadata',{}).get('shop_id','0') or 0); stripe_sub=obj.get('subscription'); status='active' if obj.get('payment_status')=='paid' else 'incomplete'; plan=obj.get('metadata',{}).get('plan','pro')
-                if sid and plan in PLAN_PRICES:c.execute('UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=? WHERE shop_id=?',(status,plan,obj.get('customer'),stripe_sub,sid))
+                details=stripe_subscription_details(stripe_sub) if status=='active' and stripe_sub else None
+                paid_until=datetime.fromtimestamp(details['current_period_end'],timezone.utc).isoformat() if details and details.get('current_period_end') else None
+                if sid and plan in PLAN_PRICES:c.execute('UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until) WHERE shop_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,sid))
             elif typ.startswith('customer.subscription.') or typ.startswith('invoice.payment_'):
                 stripe_sub=obj.get('id') if typ.startswith('customer.subscription.') else obj.get('subscription'); status=('active' if typ=='invoice.payment_succeeded' else obj.get('status','active')); paid_until=datetime.fromtimestamp(obj.get('current_period_end',0),timezone.utc).isoformat() if obj.get('current_period_end') else None
                 plan=obj.get('metadata',{}).get('plan')
