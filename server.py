@@ -70,7 +70,7 @@ def shop_public(c, shop):
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     team = c.execute('SELECT id,name,role FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
-    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'rating':4.9,'reviews':128}
+    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'services':[dict(x) for x in svc],'team':[dict(x) for x in team]}
 
 def smtp_notice(to_email, subject, body):
     host=os.environ.get('SMTP_HOST'); sender=os.environ.get('SMTP_FROM');
