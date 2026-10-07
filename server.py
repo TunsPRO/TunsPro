@@ -363,6 +363,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if user:c.execute('DELETE FROM sessions WHERE user_id=?',(user['id'],))
                 return self.json_response(200,{'ok':True},self.clear_session())
             if path=='/api/public/bookings':return self.create_booking(self.body_json())
+            if path=='/api/public/bookings/reschedule/details':return self.public_reschedule_details(self.body_json())
+            if path=='/api/public/bookings/reschedule':return self.reschedule_public_booking(self.body_json())
             if path=='/api/public/bookings/cancel':return self.cancel_public_booking(self.body_json())
             if path=='/api/client/favorites':return self.client_favorite(self.body_json())
             if path=='/api/client/bookings/cancel':return self.client_cancel_booking(self.body_json())
@@ -572,15 +574,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         months_ro=['ianuarie','februarie','martie','aprilie','mai','iunie','iulie','august','septembrie','octombrie','noiembrie','decembrie']
         when=f'{days_ro[day.weekday()]} {day.day} {months_ro[day.month-1]}, {starts:%H:%M}'
         manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+cancel_token
+        reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+cancel_token
         mail_status='unavailable';sms_status='unavailable'
         if os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
             try:
-                smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru modificare, contactează frizeria la {shop["phone"]}.')
+                smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
                 mail_status='sent'
             except Exception as e:mail_status='failed';print('Client confirmation failed:',repr(e))
         if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:
-                sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este înregistrată pentru {when}. Anulare online: {manage_url}.')
+                sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este înregistrată pentru {when}. Anulare: {manage_url}. Modificare: {reschedule_url}.')
                 sms_status='sent'
             except Exception as e:sms_status='failed';print('Client SMS confirmation failed:',repr(e))
         if opts and opts['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
@@ -590,6 +593,60 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
             except Exception as e:print('Barber SMS notification failed:',repr(e))
         return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'notifications':{'email':mail_status,'sms':sms_status},'message':'Programarea a fost înregistrată.'})
+    def public_reschedule_details(self,d):
+        token=str(d.get('token','')).strip()
+        if len(token)<30:return self.json_response(400,{'error':'Linkul de modificare nu este valid.'})
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        with connect() as c:
+            row=c.execute("SELECT b.id,b.client,b.phone,b.email,b.starts,b.service_id,b.staff_id,sh.slug shop_slug,sh.name shop_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi modificată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
+            if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi modificată online.'})
+        return self.json_response(200,{'booking':dict(row)})
+    def reschedule_public_booking(self,d):
+        token=str(d.get('token','')).strip()
+        if len(token)<30:return self.json_response(400,{'error':'Linkul de modificare nu este valid.'})
+        try:
+            day=date.fromisoformat(str(d.get('date','')));start_time=time.fromisoformat(str(d.get('time','')))
+            service_id=int(d.get('service_id',0));staff_id=int(d.get('staff_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Verifică data, ora, serviciul și frizerul ales.'})
+        token_hash=hashlib.sha256(token.encode()).hexdigest();starts=datetime.combine(day,start_time,TZ)
+        if starts<=datetime.now(TZ):return self.json_response(400,{'error':'Alege o oră viitoare.'})
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.slug shop_slug,sh.address,sh.city,sh.phone shop_phone,sh.listing_enabled,s.name old_service_name,t.name old_staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi modificată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
+            if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi modificată online.'})
+            sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(row['shop_id'],)).fetchone()
+            if not row['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă modificări online momentan. Contactează frizeria direct.'})
+            service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(service_id,row['shop_id'])).fetchone()
+            staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(staff_id,row['shop_id'])).fetchone()
+            if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu mai este disponibil.'})
+            sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()));finish=starts+timedelta(minutes=service['duration'])
+            if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):return self.json_response(400,{'error':'Ora aleasă este în afara programului frizerului.'})
+            collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status='confirmed' AND id<>? AND starts<? AND ends>?",(staff['id'],row['id'],finish.isoformat(),starts.isoformat())).fetchone()
+            if collision:return self.json_response(409,{'error':'Ora tocmai a fost rezervată. Alege alt interval.'})
+            reminder_at=starts-timedelta(hours=24);reminder_sent=0
+            if reminder_at<=now_utc():
+                if starts>now_utc()+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
+                else:reminder_sent=1
+            c.execute('UPDATE bookings SET service_id=?,staff_id=?,starts=?,ends=?,price_at_booking=?,reminder_at=?,reminder_sent=? WHERE id=?',(service['id'],staff['id'],starts.isoformat(),finish.isoformat(),service['price'],reminder_at.isoformat() if not reminder_sent else None,reminder_sent,row['id']))
+            settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
+            client_email=row['email'];client_phone=row['phone'];client=row['client'];shop_name=row['shop_name'];shop_phone=row['shop_phone'];old_starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
+        when=starts.strftime('%d.%m.%Y, %H:%M');manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+token;reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+token
+        mail_status='unavailable';sms_status='unavailable'
+        if client_email and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(client_email,f'Programare reprogramată — {shop_name}',f'Programarea ta a fost mutată de la {old_starts} la {when}, pentru {service["name"]} cu {staff["name"]}. Adresă: {row["address"]}, {row["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}.');mail_status='sent'
+            except Exception as e:mail_status='failed';print('Client reschedule email failed:',repr(e))
+        if client_phone and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(client_phone,f'TunsPro: programarea ta la {shop_name} a fost mutată pentru {when}, cu {staff["name"]}. Modificare: {reschedule_url}.');sms_status='sent'
+            except Exception as e:sms_status='failed';print('Client reschedule SMS failed:',repr(e))
+        if settings and settings['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(owner['email'],f'Programare reprogramată — {shop_name}',f'{client} a reprogramat rezervarea din {old_starts} pentru {when}, cu {staff["name"]}. Telefon: {client_phone}.')
+            except Exception as e:print('Shop reschedule email failed:',repr(e))
+        if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(shop_phone,f'TunsPro: {client} a reprogramat rezervarea pentru {when}, cu {staff["name"]}.')
+            except Exception as e:print('Shop reschedule SMS failed:',repr(e))
+        return self.json_response(200,{'ok':True,'booking_id':row['id'],'cancel_token':token,'notifications':{'email':mail_status,'sms':sms_status}})
     def cancel_public_booking(self,d):
         token=str(d.get('token','')).strip()
         if len(token)<30:return self.json_response(400,{'error':'Linkul de anulare nu este valid.'})

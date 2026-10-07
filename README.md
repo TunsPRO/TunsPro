@@ -36,6 +36,15 @@ Completează variabilele `SMTP_*` pentru confirmările prin e-mail și `TWILIO_*
 
 ## Înainte de lansare
 
+- Completează profilul cu datele reale ale frizeriei, serviciile, prețurile, personalul și programul. Aplicația nu creează automat frizerii sau programări demo; verifică datele existente înainte de a le modifica și nu șterge rezervări reale.
+- Testează o rezervare completă pe mobil și desktop: serviciu, frizer, dată, oră, date client, confirmare, anulare și reprogramare. Verifică și că o a doua rezervare nu poate ocupa același interval.
+- Verifică accesul public și rezervările pentru planurile FREE, PRO și BUSINESS în Stripe Sandbox. Nu considera plata reușită doar din redirect; verifică starea confirmată de webhook.
+- Configurează SMTP în Render și confirmă că pagina de rezervare raportează e-mailul ca trimis. Dacă SMTP nu este configurat, confirmarea rămâne pe ecran și e-mailul apare ca neconfigurat.
+- SMS-ul prin Twilio rămâne opțional până la activarea contului și configurarea variabilelor `TWILIO_*`.
+- Verifică notificările de anulare și reprogramare pentru client și frizerie, inclusiv când furnizorul de e-mail/SMS nu este configurat.
+- Confirmă politica de confidențialitate, datele de contact și informațiile operatorului înainte de promovarea publică.
+- Configurează și verifică o copie de siguranță a bazei SQLite de pe discul persistent Render și procedura de restaurare.
+
 ## Publicare pe Render
 
 Fișierul `render.yaml` pregătește serviciul web și discul persistent pentru baza SQLite. Discul persistent cere un plan Render cu plată; verifică prețul afișat în cont înainte să creezi serviciul. Aplicația este cu o singură instanță.
