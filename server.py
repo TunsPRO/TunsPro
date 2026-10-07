@@ -121,7 +121,7 @@ def stripe_subscription_details(subscription_id):
     if not key or not subscription_id:return None
     req=urllib.request.Request(f'https://api.stripe.com/v1/subscriptions/{urllib.parse.quote(str(subscription_id), safe="")}')
     req.add_header('Authorization','Bearer '+key)
-    return json.loads(urllib.request.urlopen(req,timeout=20).read())
+    details=json.loads(urllib.request.urlopen(req,timeout=20).read());details.setdefault('current_period_end',max((item.get('current_period_end',0) for item in details.get('items',{}).get('data',[])),default=0));return details
 
 def active_subscription(row):
     if not row or row['plan'] not in PLAN_PRICES or row['status'] not in ('active', 'trialing') or not row['paid_until']: return False
