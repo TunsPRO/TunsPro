@@ -504,7 +504,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not c.total_changes:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
         return self.json_response(200,{'ok':True})
     def create_booking(self,d):
-        if len(str(d.get('client','')).strip())<2 or len(''.join(x for x in str(d.get('phone','')) if x.isdigit()))<9:raise ValueError('Completează numele și un număr de telefon valid.')
+        if len(str(d.get('client','')).strip())<2 or len(''.join(x for x in str(d.get('phone','')) if x.isdigit()))<9 or '@' not in str(d.get('email','')):raise ValueError('Completează numele, telefonul și un e-mail valid pentru confirmare.')
         slug=str(d.get('slug','')); day=date.fromisoformat(d.get('date','')); start_time=time.fromisoformat(d.get('time','')); starts=datetime.combine(day,start_time,TZ)
         if starts<=datetime.now(TZ):raise ValueError('Alege o oră viitoare.')
         with connect() as c:
@@ -531,12 +531,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 smtp_notice(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
             except Exception as e:print('Email notification failed:',repr(e))
         if client_email:
-            try:smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}.')
+            try:sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este confirmată pentru {when}.');smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}.')
             except Exception as e:print('Client confirmation failed:',repr(e))
         if opts and opts['notification_sms']:
             try:
                 sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {d.get("client")}, {d.get("phone")}')
-                sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este confirmată pentru {when}.')
+                pass
             except Exception as e:print('SMS notification failed:',repr(e))
         return self.json_response(201,{'ok':True,'booking_id':booking_id,'message':'Programarea este confirmată.'})
     def cancel_booking(self,d):
