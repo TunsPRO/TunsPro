@@ -38,7 +38,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}');
-        CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER);
+        CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
         CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free');
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
@@ -51,7 +51,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
-        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER')]:
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'plan' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
@@ -132,11 +132,18 @@ def shop_public(c, shop):
     sub = c.execute('SELECT * FROM subscriptions WHERE shop_id=?', (shop['id'],)).fetchone()
     if not active_subscription(sub) or not shop['listing_enabled']: return None
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
-    team = c.execute('SELECT id,name,role FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
+    team = c.execute('SELECT id,name,role,weekly_schedule FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
     reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
     rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=?',(shop['id'],)).fetchone()
-    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[dict(x) for x in team]}
+    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':json.loads(x['weekly_schedule'] or '{}')} for x in team]}
+
+def normalize_ro_mobile(value):
+    digits=''.join(ch for ch in value if ch.isdigit())
+    if digits.startswith('0040'):digits=digits[2:]
+    if digits.startswith('0'):digits='40'+digits[1:]
+    if not digits.startswith('40'):return ''
+    return '+'+digits if re.fullmatch(r'407[0-9]{8}',digits) else ''
 
 def smtp_notice(to_email, subject, body):
     host=os.environ.get('SMTP_HOST'); sender=os.environ.get('SMTP_FROM');
@@ -292,7 +299,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                 sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone()
                         except Exception as e:print('Stripe subscription reconciliation failed:',repr(e))
                     paid=active_subscription(sub)
-                    return self.json_response(200,{'shop':dict(shop,photos=json.loads(shop['photos'] or '[]')),'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
+                    shop_data=dict(shop)
+                    try:shop_data['photos']=json.loads(shop_data.get('photos') or '[]')
+                    except (TypeError,ValueError):shop_data['photos']=[]
+                    if not isinstance(shop_data['photos'],list):shop_data['photos']=[]
+                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
@@ -325,6 +336,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if user:c.execute('DELETE FROM sessions WHERE user_id=?',(user['id'],))
                 return self.json_response(200,{'ok':True},self.clear_session())
             if path=='/api/public/bookings':return self.create_booking(self.body_json())
+            if path=='/api/public/bookings/cancel':return self.cancel_public_booking(self.body_json())
             if path=='/api/client/favorites':return self.client_favorite(self.body_json())
             if path=='/api/client/bookings/cancel':return self.client_cancel_booking(self.body_json())
             if path=='/api/client/reviews':return self.create_review(self.body_json())
@@ -504,7 +516,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not c.total_changes:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
         return self.json_response(200,{'ok':True})
     def create_booking(self,d):
-        if len(str(d.get('client','')).strip())<2 or len(''.join(x for x in str(d.get('phone','')) if x.isdigit()))<9 or '@' not in str(d.get('email','')):raise ValueError('Completează numele, telefonul și un e-mail valid pentru confirmare.')
+        client_name=str(d.get('client','')).strip();client_email=str(d.get('email','')).strip().lower()
+        client_phone=normalize_ro_mobile(str(d.get('phone','')))
+        if len(client_name)<2 or len(client_name)>100:raise ValueError('Introdu numele complet (2–100 caractere).')
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',client_email) or len(client_email)>254:raise ValueError('Introdu o adresă de e-mail validă pentru confirmare.')
+        if not client_phone:raise ValueError('Introdu un număr mobil din România valid pentru confirmarea prin SMS.')
         slug=str(d.get('slug','')); day=date.fromisoformat(d.get('date','')); start_time=time.fromisoformat(d.get('time','')); starts=datetime.combine(day,start_time,TZ)
         if starts<=datetime.now(TZ):raise ValueError('Alege o oră viitoare.')
         with connect() as c:
@@ -522,23 +538,53 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if reminder_at<=current:
                 if starts>current+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
                 else:reminder_sent=1
-            customer=self.client_auth(c);client_name=customer['name'] if customer else str(d.get('client','')).strip();client_phone=customer['phone'] if customer else str(d.get('phone','')).strip();client_email=customer['email'] if customer else str(d.get('email','')).strip()
-            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,customer['id'] if customer else None,service['price'])); booking_id=cur.lastrowid
+            cancel_token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(cancel_token.encode()).hexdigest()
+            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price'],token_hash)); booking_id=cur.lastrowid
             opts=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone(); owner=c.execute('SELECT u.email FROM users u WHERE u.id=?',(shop['user_id'],)).fetchone()
-        when=starts.strftime('%A %d %B, %H:%M')
-        if opts and opts['notification_email']:
+        days_ro=['luni','marți','miercuri','joi','vineri','sâmbătă','duminică']
+        months_ro=['ianuarie','februarie','martie','aprilie','mai','iunie','iulie','august','septembrie','octombrie','noiembrie','decembrie']
+        when=f'{days_ro[day.weekday()]} {day.day} {months_ro[day.month-1]}, {starts:%H:%M}'
+        manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+cancel_token
+        mail_status='unavailable';sms_status='unavailable'
+        if os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
             try:
-                smtp_notice(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
-            except Exception as e:print('Email notification failed:',repr(e))
-        if client_email:
-            try:sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este confirmată pentru {when}.');smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}.')
-            except Exception as e:print('Client confirmation failed:',repr(e))
-        if opts and opts['notification_sms']:
+                smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru modificare, contactează frizeria la {shop["phone"]}.')
+                mail_status='sent'
+            except Exception as e:mail_status='failed';print('Client confirmation failed:',repr(e))
+        if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:
-                sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {d.get("client")}, {d.get("phone")}')
-                pass
-            except Exception as e:print('SMS notification failed:',repr(e))
-        return self.json_response(201,{'ok':True,'booking_id':booking_id,'message':'Programarea este confirmată.'})
+                sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este înregistrată pentru {when}. Anulare online: {manage_url}.')
+                sms_status='sent'
+            except Exception as e:sms_status='failed';print('Client SMS confirmation failed:',repr(e))
+        if opts and opts['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
+            except Exception as e:print('Barber email notification failed:',repr(e))
+        if opts and opts['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
+            except Exception as e:print('Barber SMS notification failed:',repr(e))
+        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'notifications':{'email':mail_status,'sms':sms_status},'message':'Programarea a fost înregistrată.'})
+    def cancel_public_booking(self,d):
+        token=str(d.get('token','')).strip()
+        if len(token)<30:return self.json_response(400,{'error':'Linkul de anulare nu este valid.'})
+        token_hash=hashlib.sha256(token.encode()).hexdigest()
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.phone shop_phone,s.name service_name,t.name staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi anulată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
+            if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi anulată online.'})
+            c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
+            settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
+        when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
+        if row['email'] and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(row['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta din {when} a fost anulată. Dacă te-ai răzgândit, poți face o nouă rezervare pe TunsPro.')
+            except Exception as e:print('Client cancellation confirmation failed:',repr(e))
+        if settings and settings['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            try:smtp_notice(owner['email'],f'Programare anulată — {row["shop_name"]}',f'{row["client"]} a anulat programarea din {when}.')
+            except Exception as e:print('Barber cancellation notice failed:',repr(e))
+        if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(row['shop_phone'],f'TunsPro: clientul {row["client"]} a anulat programarea din {when}.')
+            except Exception as e:print('Barber cancellation SMS failed:',repr(e))
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată.'})
     def cancel_booking(self,d):
         with connect() as c:
             user=self.auth(c)
