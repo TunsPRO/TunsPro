@@ -322,7 +322,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/webhooks/stripe':return self.stripe_webhook()
             return self.json_response(404,{'error':'Nu am găsit ruta.'})
         except ValueError as e:return self.json_response(400,{'error':str(e)})
-        except Exception as e:print('POST error:',repr(e));return self.json_response(500,{'error':'A apărut o eroare. Încearcă din nou.'})
+        except Exception as e:print('POST error:',repr(e));detail=(json.loads(e.read()).get('error',{}).get('message','') if isinstance(e,urllib.error.HTTPError) else '');return self.json_response(500,{'error':('Stripe: '+detail) if detail else 'A apărut o eroare. Încearcă din nou.'})
     def do_PUT(self):
         path=urllib.parse.urlparse(self.path).path
         try:
