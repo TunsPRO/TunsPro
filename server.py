@@ -205,7 +205,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 user=self.auth(c)
                 if not user:return self.json_response(200,{'user':None})
                 shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone()
-                return self.json_response(200,{'user':{'email':user['email'],'owner':user['owner']},'shop':dict(shop),'subscription':{'active':active_subscription(sub),'status':sub['status'],'paid_until':sub['paid_until']}})
+                return self.json_response(200,{'user':{'email':user['email'],'owner':user['owner']},'shop':dict(shop,photos=json.loads(shop['photos'] or '[]')),'subscription':{'active':active_subscription(sub),'status':sub['status'],'paid_until':sub['paid_until']}})
         if path=='/api/client/me':
             with connect() as c:
                 customer=self.client_auth(c)
@@ -277,7 +277,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if path=='/api/manage/dashboard':
                     svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('confirmed','completed') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
                     paid=active_subscription(sub)
-                    return self.json_response(200,{'shop':dict(shop),'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
+                    return self.json_response(200,{'shop':dict(shop,photos=json.loads(shop['photos'] or '[]')),'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
