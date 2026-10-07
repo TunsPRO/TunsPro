@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib, hmac, http.server, json, os, secrets, smtplib, sqlite3, ssl, urllib.parse, urllib.request
 import unicodedata
+import threading
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from http import cookies
@@ -42,6 +43,18 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(shop_id INTEGER PRIMARY KEY REFERENCES shops(id) ON DELETE CASCADE, notification_email INTEGER NOT NULL DEFAULT 1, notification_sms INTEGER NOT NULL DEFAULT 0);
         ''')
+    anonymize_old_bookings()
+
+def anonymize_old_bookings():
+    cutoff=(now_utc()-timedelta(days=365)).isoformat()
+    with connect() as c:
+        c.execute("UPDATE bookings SET client='Date anonimizate',phone='',email='' WHERE julianday(ends)<julianday(?) AND (client<>'Date anonimizate' OR phone<>'' OR email<>'')",(cutoff,))
+
+def anonymization_loop():
+    while True:
+        threading.Event().wait(24*60*60)
+        try: anonymize_old_bookings()
+        except Exception as e: print('Booking anonymization failed:',repr(e))
 
 def now_utc(): return datetime.now(timezone.utc)
 def iso_now(): return now_utc().isoformat()
@@ -338,5 +351,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 if __name__=='__main__':
     init_db()
+    threading.Thread(target=anonymization_loop,daemon=True).start()
     print(f'TunsPro running at http://localhost:{PORT}')
     http.server.ThreadingHTTPServer(('0.0.0.0',PORT),Handler).serve_forever()
