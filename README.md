@@ -17,6 +17,10 @@ Baza de date `tunspro.sqlite3` este creată la prima pornire. Nu deschide `index
 - Căutare publică numai pentru frizeriile cu abonament activ, cu filtrare după frizerie, oraș, servicii și personal.
 - Program săptămânal per frizer, intervale de 15 minute, verificarea suprapunerilor și rezervări tranzacționale.
 - Anularea programărilor din dashboard.
+- Conturi de client separate, cu programări, istoric, favorite și ștergerea contului.
+- Recenzii publice permise doar după programări marcate ca încheiate.
+- Panou Admin pentru statistici de platformă și vizibilitatea profilurilor.
+- Pagini de marketing pentru frizerii: link public, distribuire și statistici.
 - Abonament recurent de 49 RON prin Stripe Checkout; webhooks activează/dezactivează accesul pe baza stării din Stripe.
 - E-mailuri prin SMTP și SMS prin Twilio, ambele opționale.
 
@@ -41,6 +45,10 @@ Fișierul `render.yaml` pregătește serviciul web și discul persistent pentru 
 3. La configurare, introdu `PUBLIC_URL` ca URL-ul serviciului Render (de exemplu `https://tunspro.onrender.com`; verifică numele disponibil în dashboard). Adaugă cheia Stripe de test în `STRIPE_SECRET_KEY`. Nu pune chei secrete în repository, în fișierele publice sau în mesaje.
 4. După publicare, verifică URL-ul aplicației și corectează `PUBLIC_URL` în **Environment** dacă diferă. În Stripe, creează webhook-ul la `https://<domeniul-aplicației>/api/webhooks/stripe`, selectează evenimentele enumerate în secțiunea **Plăți reale**, apoi copiază secretul webhook în `STRIPE_WEBHOOK_SECRET` din Render și redeployează.
 5. E-mailul și SMS-ul sunt opționale; completează variabilele lor în Render când ai conturile furnizorilor. Testează cu Stripe în modul test înainte să treci la chei live.
+
+## Panoul Admin
+
+Configurează `ADMIN_EMAIL` și `ADMIN_PASSWORD` în **Render → Environment**. Parola trebuie să aibă cel puțin 16 caractere. La pornirea aplicației, contul de administrator este creat sau sincronizat cu aceste valori; dacă schimbi parola, redeployează serviciul. Panoul este la `https://<domeniul-aplicației>/#admin-login`. Nu folosi o parolă comună cu alte conturi și nu o pune în repository.
 
 Pentru un repository nou, publică doar fișierele aplicației; `.gitignore` exclude `.env`, baza de date și cache-urile. Păstrează cheile Stripe doar în setările protejate ale serviciului Render. Dacă cheia de test a fost distribuită public, rotește-o din Stripe înainte de folosire.
 
