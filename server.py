@@ -49,13 +49,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, booking_id INTEGER UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5), comment TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS bookings_customer_start ON bookings(customer_id,starts);
+
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
         for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
-        admin_email=os.environ.get('ADMIN_EMAIL','').lower().strip(); admin_password=os.environ.get('ADMIN_PASSWORD','')
+        c.execute('CREATE INDEX IF NOT EXISTS bookings_customer_start ON bookings(customer_id,starts)'); admin_email=os.environ.get('ADMIN_EMAIL','').lower().strip(); admin_password=os.environ.get('ADMIN_PASSWORD','')
         if admin_email and len(admin_password)>=16 and '@' in admin_email:
             c.execute('DELETE FROM admins WHERE email<>?',(admin_email,))
             c.execute('INSERT INTO admins(email,password,created) VALUES(?,?,?) ON CONFLICT(email) DO UPDATE SET password=excluded.password',(admin_email,password_hash(admin_password),iso_now()))
