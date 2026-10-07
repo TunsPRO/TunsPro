@@ -123,6 +123,31 @@ def stripe_subscription_details(subscription_id):
     req.add_header('Authorization','Bearer '+key)
     details=json.loads(urllib.request.urlopen(req,timeout=20).read());details.setdefault('current_period_end',max((item.get('current_period_end',0) for item in details.get('items',{}).get('data',[])),default=0));return details
 
+def stripe_api(key,path,params=None):
+    url='https://api.stripe.com/v1/'+path
+    data=None
+    if params is not None:data=urllib.parse.urlencode(params).encode()
+    req=urllib.request.Request(url,data=data);req.add_header('Authorization','Bearer '+key)
+    return json.loads(urllib.request.urlopen(req,timeout=20).read())
+
+def stripe_business_upgrade_session(key,customer_id,subscription_id,return_url):
+    details=stripe_subscription_details(subscription_id)
+    items=(details or {}).get('items',{}).get('data',[])
+    if len(items)!=1:raise ValueError('Abonamentul nu poate fi schimbat automat. Contactează suportul TunsPro.')
+    item=items[0]
+    products=stripe_api(key,'products?active=true&limit=100').get('data',[])
+    product=next((p for p in products if p.get('name')=='TunsPro BUSINESS' and p.get('metadata',{}).get('tunspro_plan')=='business'),None)
+    if not product:product=stripe_api(key,'products',{'name':'TunsPro BUSINESS','description':'Abonament lunar TunsPro BUSINESS — echipă cu mai mulți frizeri.','metadata[tunspro_plan]':'business'})
+    prices=stripe_api(key,'prices?active=true&limit=100&product='+urllib.parse.quote(product['id'],safe='')).get('data',[])
+    price=next((p for p in prices if p.get('currency')=='ron' and p.get('unit_amount')==PLAN_PRICES['business'] and p.get('recurring',{}).get('interval')=='month' and p.get('metadata',{}).get('plan')=='business'),None)
+    if not price:price=stripe_api(key,'prices',{'product':product['id'],'currency':'ron','unit_amount':str(PLAN_PRICES['business']),'recurring[interval]':'month','nickname':'TunsPro BUSINESS','metadata[plan]':'business'})
+    configurations=stripe_api(key,'billing_portal/configurations?limit=100').get('data',[])
+    config=next((x for x in configurations if x.get('active') and x.get('metadata',{}).get('tunspro_business_upgrade')=='1' and x.get('features',{}).get('subscription_update',{}).get('enabled') and any(p.get('product')==product['id'] and price['id'] in p.get('prices',[]) for p in x.get('features',{}).get('subscription_update',{}).get('products',[]))),None)
+    if not config:
+        config=stripe_api(key,'billing_portal/configurations',{'features[subscription_update][enabled]':'true','features[subscription_update][default_allowed_updates][]':'price','features[subscription_update][proration_behavior]':'always_invoice','features[subscription_update][products][0][product]':product['id'],'features[subscription_update][products][0][prices][0]':price['id'],'metadata[tunspro_business_upgrade]':'1'})
+    params={'customer':customer_id,'configuration':config['id'],'return_url':return_url,'flow_data[type]':'subscription_update_confirm','flow_data[subscription_update_confirm][subscription]':subscription_id,'flow_data[subscription_update_confirm][items][0][id]':item['id'],'flow_data[subscription_update_confirm][items][0][price]':price['id'],'flow_data[subscription_update_confirm][items][0][quantity]':'1','flow_data[after_completion][type]':'redirect','flow_data[after_completion][redirect][return_url]':return_url}
+    return stripe_api(key,'billing_portal/sessions',params)
+
 def active_subscription(row):
     if not row or row['plan'] not in PLAN_PRICES or row['status'] not in ('active', 'trialing') or not row['paid_until']: return False
     try: return datetime.fromisoformat(row['paid_until'].replace('Z', '+00:00')) > now_utc()
@@ -620,13 +645,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone()
             public=os.environ.get('PUBLIC_URL',f'http://localhost:{PORT}')
             current=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone()
-            if active_subscription(current) and current['stripe_customer_id']:
-                params=urllib.parse.urlencode({'customer':current['stripe_customer_id'],'return_url':public+'/#dashboard-abonament'}).encode()
-                req=urllib.request.Request('https://api.stripe.com/v1/billing_portal/sessions',data=params);req.add_header('Authorization','Bearer '+key)
-                response=json.loads(urllib.request.urlopen(req,timeout=20).read());return self.json_response(200,{'url':response['url']})
             body=self.body_json(); plan=str(body.get('plan','pro')).lower()
             if plan not in PLAN_PRICES:return self.json_response(400,{'error':'Alege planul PRO sau BUSINESS.'})
-            if current and current['plan']==plan and active_subscription(current) and current['stripe_customer_id']:
+            if active_subscription(current) and current['stripe_customer_id']:
+                if current['plan']=='pro' and plan=='business' and current['stripe_subscription_id']:
+                    try:session=stripe_business_upgrade_session(key,current['stripe_customer_id'],current['stripe_subscription_id'],public+'/?payment=success#dashboard-abonament')
+                    except ValueError as e:return self.json_response(400,{'error':str(e)})
+                    return self.json_response(200,{'url':session['url']})
                 params=urllib.parse.urlencode({'customer':current['stripe_customer_id'],'return_url':public+'/#dashboard-abonament'}).encode()
                 req=urllib.request.Request('https://api.stripe.com/v1/billing_portal/sessions',data=params);req.add_header('Authorization','Bearer '+key)
                 response=json.loads(urllib.request.urlopen(req,timeout=20).read());return self.json_response(200,{'url':response['url']})
@@ -654,7 +679,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if sid and plan in PLAN_PRICES:c.execute('UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until) WHERE shop_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,sid))
             elif typ.startswith('customer.subscription.') or typ.startswith('invoice.payment_'):
                 stripe_sub=obj.get('id') if typ.startswith('customer.subscription.') else obj.get('subscription'); status=('active' if typ=='invoice.payment_succeeded' else obj.get('status','active')); paid_until=datetime.fromtimestamp(obj.get('current_period_end',0),timezone.utc).isoformat() if obj.get('current_period_end') else None
-                plan=obj.get('metadata',{}).get('plan')
+                item_plans=[x.get('price',{}).get('metadata',{}).get('plan') for x in obj.get('items',{}).get('data',[]) if x.get('price',{}).get('metadata',{}).get('plan') in PLAN_PRICES]
+                plan=(item_plans[0] if item_plans else None) or obj.get('metadata',{}).get('plan')
                 if typ=='invoice.payment_failed':status='past_due'
                 cur=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=COALESCE(?,stripe_subscription_id),paid_until=COALESCE(?,paid_until) WHERE stripe_subscription_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,stripe_sub))
                 if cur.rowcount==0 and obj.get('metadata',{}).get('shop_id'):
