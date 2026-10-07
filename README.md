@@ -23,6 +23,7 @@ Baza de date `tunspro.sqlite3` este creată la prima pornire. Nu deschide `index
 - Pagini de marketing pentru frizerii: link public, distribuire și statistici.
 - Abonament recurent de 49 RON prin Stripe Checkout; webhooks activează/dezactivează accesul pe baza stării din Stripe.
 - E-mailuri prin SMTP și SMS prin Twilio, ambele opționale.
+- Recuperarea parolei contului frizeriei prin link de unică folosință, cu expirare după 30 de minute și invalidarea sesiunilor existente.
 
 ## Plăți reale
 
@@ -34,9 +35,13 @@ Stripe suportă comercianți din România și abonamente recurente prin Checkout
 
 Completează variabilele `SMTP_*` pentru confirmările prin e-mail și `TWILIO_*` pentru SMS. La rezervare, aplicația trimite confirmări clientului (e-mailul este opțional în formular), plus notificări proprietarului în funcție de preferințele setate în dashboard. SMS se trimite către client și frizerie când integrarea Twilio este configurată.
 
+Resetarea parolei folosește același SMTP și `PUBLIC_URL` ca să construiască linkul. Cererile arată același mesaj indiferent dacă e-mailul există; linkurile sunt limitate la o utilizare și se invalidează după resetare. Pentru dezvoltare, testează într-un cont și o bază SQLite temporare; nu cere resetarea parolei unui cont real doar pentru a verifica e-mailul.
+
 ## Înainte de lansare
 
 - Completează profilul cu datele reale ale frizeriei, serviciile, prețurile, personalul și programul. Aplicația nu creează automat frizerii sau programări demo; verifică datele existente înainte de a le modifica și nu șterge rezervări reale.
+- Baza SQLite este pe discul persistent Render (`/var/data`). Render face snapshot-uri automate zilnice, păstrate cel puțin 7 zile. Verifică periodic fila **Disks** a serviciului. Restaurarea unui snapshot înlocuiește tot conținutul discului, inclusiv schimbările de după acel moment; exportă separat datele importante înainte de o restaurare.
+- Pentru e-mail, setează `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` și `PUBLIC_URL` în Render. Confirmă că `SMTP_FROM` este acceptat de furnizor. Pentru SMS sunt necesare `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` și `TWILIO_FROM`; până atunci interfața nu poate livra mesaje SMS.
 - Testează o rezervare completă pe mobil și desktop: serviciu, frizer, dată, oră, date client, confirmare, anulare și reprogramare. Verifică și că o a doua rezervare nu poate ocupa același interval.
 - Verifică accesul public și rezervările pentru planurile FREE, PRO și BUSINESS în Stripe Sandbox. Nu considera plata reușită doar din redirect; verifică starea confirmată de webhook.
 - Configurează SMTP în Render și confirmă că pagina de rezervare raportează e-mailul ca trimis. Dacă SMTP nu este configurat, confirmarea rămâne pe ecran și e-mailul apare ca neconfigurat.

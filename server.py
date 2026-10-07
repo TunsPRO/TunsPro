@@ -42,6 +42,9 @@ def init_db():
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
         CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free');
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS password_resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS password_resets_user ON password_resets(user_id);
+        CREATE TABLE IF NOT EXISTS password_reset_limits(email_hash TEXT PRIMARY KEY, requested TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(shop_id INTEGER PRIMARY KEY REFERENCES shops(id) ON DELETE CASCADE, notification_email INTEGER NOT NULL DEFAULT 1, notification_sms INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS client_sessions(token_hash TEXT PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, expires TEXT NOT NULL);
@@ -344,6 +347,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if origin and urllib.parse.urlparse(origin).netloc!=self.headers.get('Host'):return self.json_response(403,{'error':'Origine invalidă.'})
             if path=='/api/auth/register':return self.register(self.body_json())
             if path=='/api/auth/login':return self.login(self.body_json())
+            if path=='/api/auth/password-reset/request':return self.request_password_reset(self.body_json())
+            if path=='/api/auth/password-reset/confirm':return self.confirm_password_reset(self.body_json())
             if path=='/api/client/auth/register':return self.client_register(self.body_json())
             if path=='/api/client/auth/login':return self.client_login(self.body_json())
             if path=='/api/admin/login':return self.admin_login(self.body_json())
@@ -479,6 +484,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             user=c.execute('SELECT * FROM users WHERE email=?',(str(d.get('email','')).lower().strip(),)).fetchone()
             if not user or not password_ok(str(d.get('password','')),user['password']):return self.json_response(401,{'error':'E-mailul sau parola nu sunt corecte.'})
         return self.json_response(200,{'ok':True},self.set_session(user['id']))
+    def request_password_reset(self,d):
+        email=str(d.get('email','')).strip().lower()
+        generic={'ok':True,'message':'Dacă adresa este asociată unui cont și e-mailul poate fi trimis, vei primi un link de resetare.'}
+        if len(email)>254 or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',email):return self.json_response(200,generic)
+        email_hash=hashlib.sha256(email.encode()).hexdigest();now=now_utc();token='';user_id=None
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute('DELETE FROM password_reset_limits WHERE requested<?',((now-timedelta(days=30)).isoformat(),))
+            previous=c.execute('SELECT requested FROM password_reset_limits WHERE email_hash=?',(email_hash,)).fetchone()
+            allowed=not previous or now-datetime.fromisoformat(previous['requested'])>=timedelta(minutes=5)
+            c.execute('INSERT INTO password_reset_limits(email_hash,requested) VALUES(?,?) ON CONFLICT(email_hash) DO UPDATE SET requested=excluded.requested',(email_hash,now.isoformat()))
+            if allowed:
+                user=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
+                mail_ready=bool(os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM') and os.environ.get('PUBLIC_URL'))
+                if user and mail_ready:
+                    user_id=user['id'];token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(token.encode()).hexdigest()
+                    c.execute('DELETE FROM password_resets WHERE user_id=? OR expires<=?',(user_id,now.isoformat()))
+                    c.execute('INSERT INTO password_resets(token_hash,user_id,expires,created) VALUES(?,?,?,?)',(token_hash,user_id,(now+timedelta(minutes=30)).isoformat(),now.isoformat()))
+        if user_id:
+            reset_url=os.environ['PUBLIC_URL'].rstrip('/')+'/#resetare-parola/'+token
+            threading.Thread(target=self.send_password_reset_email,args=(email,reset_url),daemon=True).start()
+        return self.json_response(200,generic)
+    @staticmethod
+    def send_password_reset_email(email,reset_url):
+        try:smtp_notice(email,'Resetarea parolei TunsPro',f'Am primit o cerere de resetare a parolei contului tău TunsPro. Deschide linkul în următoarele 30 de minute pentru a alege o parolă nouă:\n\n{reset_url}\n\nDacă nu ai solicitat resetarea, ignoră acest mesaj. Parola nu se schimbă până când nu confirmi linkul.')
+        except Exception as e:print('Password reset email failed:',repr(e))
+    def confirm_password_reset(self,d):
+        token=str(d.get('token','')).strip();password=str(d.get('password',''))
+        if len(token)<30:return self.json_response(400,{'error':'Linkul de resetare nu este valid sau a expirat. Cere un link nou.'})
+        if len(password)<10 or len(password)>200:return self.json_response(400,{'error':'Alege o parolă între 10 și 200 de caractere.'})
+        token_hash=hashlib.sha256(token.encode()).hexdigest();now=now_utc();user_id=None;email=None
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT r.user_id,r.expires,u.email FROM password_resets r JOIN users u ON u.id=r.user_id WHERE r.token_hash=?',(token_hash,)).fetchone()
+            if not row or datetime.fromisoformat(row['expires'])<=now:
+                if row:c.execute('DELETE FROM password_resets WHERE token_hash=?',(token_hash,))
+                return self.json_response(400,{'error':'Linkul de resetare nu este valid sau a expirat. Cere un link nou.'})
+            user_id=row['user_id'];email=row['email']
+            c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(password),user_id))
+            c.execute('DELETE FROM password_resets WHERE user_id=?',(user_id,))
+            c.execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
+        if email and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+            threading.Thread(target=self.send_password_changed_email,args=(email,),daemon=True).start()
+        return self.json_response(200,{'ok':True,'message':'Parola a fost schimbată. Conectează-te cu parola nouă.'})
+    @staticmethod
+    def send_password_changed_email(email):
+        try:smtp_notice(email,'Parola contului TunsPro a fost schimbată','Parola contului tău TunsPro a fost schimbată. Dacă nu ai făcut tu această modificare, contactează-ne imediat la tunsprogramari@gmail.com.')
+        except Exception as e:print('Password change notification failed:',repr(e))
     def client_register(self,d):
         name=str(d.get('name','')).strip();email=str(d.get('email','')).lower().strip();phone=str(d.get('phone','')).strip();password=str(d.get('password',''))
         if len(name)<2 or '@' not in email or len(''.join(x for x in phone if x.isdigit()))<9:raise ValueError('Verifică numele, e-mailul și numărul de telefon.')
