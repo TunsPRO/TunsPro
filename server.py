@@ -195,7 +195,7 @@ def send_email(to_email, subject, body):
         if not resend_key or not resend_from:
             raise RuntimeError('Resend requires both RESEND_API_KEY and RESEND_FROM')
         payload=json.dumps({'from':resend_from,'to':[to_email],'subject':subject,'text':body}).encode()
-        req=urllib.request.Request('https://api.resend.com/emails',data=payload,headers={'Authorization':'Bearer '+resend_key,'Content-Type':'application/json'})
+        req=urllib.request.Request('https://api.resend.com/emails',data=payload,headers={'Authorization':'Bearer '+resend_key,'Accept':'application/json','Content-Type':'application/json','User-Agent':'TunsPro/1.0'})
         try:
             with urllib.request.urlopen(req,timeout=20) as response:
                 if response.status < 200 or response.status >= 300:
