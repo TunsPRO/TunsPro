@@ -34,19 +34,26 @@ def connect():
 def init_db():
     with connect() as c:
         c.executescript('''
-        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
+        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
-        CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free');
+        CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free', stripe_event_created INTEGER NOT NULL DEFAULT 0, current_period_start TEXT);
+        CREATE TABLE IF NOT EXISTS stripe_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, event_created INTEGER NOT NULL, received TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, stripe_invoice_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_customer_id TEXT, stripe_subscription_id TEXT, amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'ron', status TEXT NOT NULL, paid_at TEXT, invoice_url TEXT, created TEXT NOT NULL, stripe_event_created INTEGER NOT NULL DEFAULT 0, refunded_amount INTEGER NOT NULL DEFAULT 0, stripe_payment_intent_id TEXT);
+        CREATE TABLE IF NOT EXISTS refunds(id INTEGER PRIMARY KEY, stripe_refund_id TEXT NOT NULL UNIQUE, stripe_invoice_id TEXT, stripe_charge_id TEXT, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'ron', status TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS subscription_history(id INTEGER PRIMARY KEY, stripe_event_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_subscription_id TEXT, event_type TEXT NOT NULL, status TEXT, plan TEXT, period_start TEXT, period_end TEXT, event_created INTEGER NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, admin_email TEXT NOT NULL, action TEXT NOT NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, details TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS booking_audit(id INTEGER PRIMARY KEY, booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, action TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id INTEGER, old_starts TEXT, new_starts TEXT, old_status TEXT, new_status TEXT, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS login_limits(email_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL, blocked_until TEXT);
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS password_resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL, created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS password_resets_user ON password_resets(user_id);
         CREATE TABLE IF NOT EXISTS password_reset_limits(email_hash TEXT PRIMARY KEY, requested TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(shop_id INTEGER PRIMARY KEY REFERENCES shops(id) ON DELETE CASCADE, notification_email INTEGER NOT NULL DEFAULT 1, notification_sms INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS customers(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
         CREATE TABLE IF NOT EXISTS client_sessions(token_hash TEXT PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS favorites(customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, created TEXT NOT NULL, PRIMARY KEY(customer_id,shop_id));
         CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, booking_id INTEGER UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5), comment TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
@@ -54,13 +61,29 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
-        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT')]:
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'photo' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
             c.execute("ALTER TABLE staff ADD COLUMN photo TEXT NOT NULL DEFAULT ''")
         if 'plan' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
             c.execute("ALTER TABLE subscriptions ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
+        if 'stripe_event_created' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
+            c.execute('ALTER TABLE subscriptions ADD COLUMN stripe_event_created INTEGER NOT NULL DEFAULT 0')
+        if 'current_period_start' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
+            c.execute('ALTER TABLE subscriptions ADD COLUMN current_period_start TEXT')
+        if 'stripe_event_created' not in {row['name'] for row in c.execute('PRAGMA table_info(payments)')}:
+            c.execute('ALTER TABLE payments ADD COLUMN stripe_event_created INTEGER NOT NULL DEFAULT 0')
+        for column,definition in [('refunded_amount','INTEGER NOT NULL DEFAULT 0'),('stripe_payment_intent_id','TEXT')]:
+            if column not in {row['name'] for row in c.execute('PRAGMA table_info(payments)')}:
+                c.execute(f'ALTER TABLE payments ADD COLUMN {column} {definition}')
+        for table in ('users','customers'):
+            if 'status' not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+            if 'last_login' not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN last_login TEXT')
+        if 'last_login' not in {row['name'] for row in c.execute('PRAGMA table_info(admins)')}:
+            c.execute('ALTER TABLE admins ADD COLUMN last_login TEXT')
         c.execute("UPDATE subscriptions SET plan='pro' WHERE plan='free' AND status IN ('active','trialing') AND paid_until IS NOT NULL")
         # Existing databases need the bookings columns added before this index
         # is created; CREATE TABLE IF NOT EXISTS does not migrate old tables.
@@ -107,6 +130,21 @@ def reminder_loop():
 
 def now_utc(): return datetime.now(timezone.utc)
 def iso_now(): return now_utc().isoformat()
+def login_limit_key(kind,email): return hashlib.sha256((kind+':'+str(email).strip().lower()).encode()).hexdigest()
+def login_is_limited(c,key):
+    row=c.execute('SELECT blocked_until FROM login_limits WHERE email_hash=?',(key,)).fetchone()
+    return bool(row and row['blocked_until'] and datetime.fromisoformat(row['blocked_until'])>now_utc())
+def login_failure(c,key):
+    now=now_utc();row=c.execute('SELECT failures,window_start FROM login_limits WHERE email_hash=?',(key,)).fetchone()
+    if not row or now-datetime.fromisoformat(row['window_start'])>=timedelta(minutes=15):
+        c.execute('INSERT INTO login_limits(email_hash,failures,window_start,blocked_until) VALUES(?,1,?,NULL) ON CONFLICT(email_hash) DO UPDATE SET failures=1,window_start=excluded.window_start,blocked_until=NULL',(key,now.isoformat()));return
+    failures=row['failures']+1;blocked=(now+timedelta(minutes=15)).isoformat() if failures>=10 else None
+    c.execute('UPDATE login_limits SET failures=?,blocked_until=COALESCE(?,blocked_until) WHERE email_hash=?',(failures,blocked,key))
+def login_success(c,key): c.execute('DELETE FROM login_limits WHERE email_hash=?',(key,))
+def record_booking_event(c,booking_id,shop_id,action,actor_type,actor_id=None,old_starts=None,new_starts=None,old_status=None,new_status=None):
+    c.execute('INSERT INTO booking_audit(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,iso_now()))
+def record_subscription_event(c,event_id,event_type,event_created,shop_id,stripe_sub,status,plan,period_start,period_end):
+    c.execute('INSERT OR IGNORE INTO subscription_history(stripe_event_id,shop_id,stripe_subscription_id,event_type,status,plan,period_start,period_end,event_created,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(event_id,shop_id,stripe_sub,event_type,status,plan,period_start,period_end,event_created,iso_now()))
 def password_hash(password, salt=None):
     salt = salt or secrets.token_bytes(16)
     result = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 240000)
@@ -161,6 +199,10 @@ def active_subscription(row):
     except ValueError: return False
 
 def shop_public(c, shop):
+    owner=c.execute('SELECT status FROM users WHERE id=?',(shop['user_id'],)).fetchone()
+    if not owner or owner['status']!='active':return None
+    approval=c.execute('SELECT approval_status FROM shops WHERE id=?',(shop['id'],)).fetchone()
+    if not approval or approval['approval_status']!='approved':return None
     sub = c.execute('SELECT * FROM subscriptions WHERE shop_id=?', (shop['id'],)).fetchone()
     if not active_subscription(sub) or not shop['listing_enabled']: return None
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
@@ -240,7 +282,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_session'].value if 'tunspro_session' in jar else ''
         if not token: return None
-        return c.execute('SELECT u.*,s.id shop_id,s.name shop_name,s.slug shop_slug FROM sessions x JOIN users u ON u.id=x.user_id JOIN shops s ON s.user_id=u.id WHERE x.token_hash=? AND x.expires>?',(hashlib.sha256(token.encode()).hexdigest(),iso_now())).fetchone()
+        return c.execute("SELECT u.*,s.id shop_id,s.name shop_name,s.slug shop_slug FROM sessions x JOIN users u ON u.id=x.user_id JOIN shops s ON s.user_id=u.id WHERE x.token_hash=? AND x.expires>? AND u.status='active'",(hashlib.sha256(token.encode()).hexdigest(),iso_now())).fetchone()
     def set_session(self,user_id):
         token=secrets.token_urlsafe(32); expiry=now_utc()+timedelta(days=30)
         with connect() as c: c.execute('INSERT INTO sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user_id,expiry.isoformat()))
@@ -250,7 +292,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def client_auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_client'].value if 'tunspro_client' in jar else ''
         if not token:return None
-        return c.execute('SELECT * FROM customers WHERE id=(SELECT customer_id FROM client_sessions WHERE token_hash=? AND expires>?)',(hashlib.sha256(token.encode()).hexdigest(),iso_now())).fetchone()
+        return c.execute("SELECT * FROM customers WHERE status='active' AND id=(SELECT customer_id FROM client_sessions WHERE token_hash=? AND expires>?)",(hashlib.sha256(token.encode()).hexdigest(),iso_now())).fetchone()
     def set_client_session(self,customer_id):
         token=secrets.token_urlsafe(32); expiry=now_utc()+timedelta(days=30)
         with connect() as c:c.execute('INSERT INTO client_sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),customer_id,expiry.isoformat()))
@@ -269,6 +311,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def clear_admin_session(self):return {'Set-Cookie':'tunspro_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'}
     def get(self):
         u=urllib.parse.urlparse(self.path); path=urllib.parse.unquote(u.path); q=urllib.parse.parse_qs(u.query)
+        if path=='/api/admin/backup':
+            with connect() as c:
+                admin=self.admin_auth(c)
+                if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+                c.execute('INSERT INTO admin_audit(admin_email,action,details,created) VALUES(?,?,?,?)',(admin['email'],'database_backup_downloaded','{}',iso_now()))
+            with connect() as source:
+                snapshot=sqlite3.connect(':memory:')
+                source.backup(snapshot);body=snapshot.serialize();snapshot.close()
+            filename='tunspro-backup-'+datetime.now(TZ).strftime('%Y%m%d-%H%M%S')+'.sqlite3'
+            self.send_response(200);self.send_header('Content-Type','application/vnd.sqlite3');self.send_header('Content-Disposition',f'attachment; filename="{filename}"');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
+        if path=='/api/admin/bookings.csv':
+            with connect() as c:
+                if not self.admin_auth(c):return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+                rows=c.execute('SELECT b.client,b.phone,b.email,sh.name shop_name,sh.city,s.name service_name,t.name staff_name,b.starts,b.ends,b.status,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC').fetchall()
+            import csv,io
+            stream=io.StringIO(newline='');writer=csv.writer(stream);writer.writerow(['Client','Telefon','E-mail','Frizerie','Localitate','Serviciu','Frizer','Început','Sfârșit','Status','Preț RON'])
+            for row in rows:
+                values=[row['client'],row['phone'],row['email'],row['shop_name'],row['city'],row['service_name'],row['staff_name'],datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),datetime.fromisoformat(row['ends']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),row['status'],row['price']]
+                writer.writerow([("'"+v if isinstance(v,str) and v.startswith(('=','+','-','@')) else v) for v in values])
+            body=('\ufeff'+stream.getvalue()).encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/csv; charset=utf-8');self.send_header('Content-Disposition','attachment; filename="tunspro-programari.csv"');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
         if path.startswith('/media/'):
             name=path.rsplit('/',1)[-1]
             if not re.fullmatch(r'[0-9a-f]{32}\.(?:jpg|png|webp)',name):return self.send_error(404)
@@ -304,13 +366,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path=='/api/admin/dashboard':
             with connect() as c:
                 if not self.admin_auth(c):return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
-                shops=c.execute('SELECT sh.id,sh.name,sh.slug,sh.city,sh.created,sh.listing_enabled,sub.status subscription_status,sub.paid_until,(SELECT COUNT(*) FROM bookings b WHERE b.shop_id=sh.id) booking_count FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sh.created DESC').fetchall()
-                counts={'shops':c.execute('SELECT COUNT(*) FROM shops').fetchone()[0],'active_subscriptions':c.execute('SELECT COUNT(*) FROM subscriptions WHERE status IN (\'active\',\'trialing\') AND julianday(paid_until)>julianday(?)',(iso_now(),)).fetchone()[0],'customers':c.execute('SELECT COUNT(*) FROM customers').fetchone()[0],'bookings':c.execute('SELECT COUNT(*) FROM bookings').fetchone()[0]}
-                owners=c.execute('SELECT u.id,u.email,u.owner,u.created,sh.name shop_name,sh.city FROM users u JOIN shops sh ON sh.user_id=u.id ORDER BY u.created DESC').fetchall()
-                customers=c.execute('SELECT c.id,c.name,c.email,c.phone,c.created,COUNT(b.id) booking_count FROM customers c LEFT JOIN bookings b ON b.customer_id=c.id GROUP BY c.id ORDER BY c.created DESC').fetchall()
-                bookings=c.execute('SELECT b.id,b.client,b.phone,b.starts,b.status,sh.name shop_name,s.name service_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id ORDER BY b.created DESC LIMIT 100').fetchall()
-                subscriptions=c.execute('SELECT sh.id shop_id,sh.name shop_name,sh.city,sub.status,sub.paid_until FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sub.paid_until DESC').fetchall()
-                return self.json_response(200,{'counts':counts,'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'bookings':[dict(x) for x in bookings],'subscriptions':[dict(x) for x in subscriptions]})
+                shops=c.execute('SELECT sh.id,sh.user_id,sh.name,sh.slug,sh.city,sh.address,sh.phone,sh.photos,sh.created,sh.listing_enabled,sh.approval_status,u.status account_status,sub.status subscription_status,sub.plan,sub.paid_until,(SELECT COUNT(*) FROM bookings b WHERE b.shop_id=sh.id) booking_count FROM shops sh JOIN users u ON u.id=sh.user_id LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY CASE sh.approval_status WHEN \'pending\' THEN 0 ELSE 1 END,sh.created DESC').fetchall()
+                now=now_utc();local_today=datetime.now(TZ).date();today_start=datetime.combine(local_today,time.min,TZ).isoformat();today_end=datetime.combine(local_today+timedelta(days=1),time.min,TZ).isoformat();month_start=datetime.combine(local_today.replace(day=1),time.min,TZ).astimezone(timezone.utc).isoformat();days_30_start=datetime.combine(local_today-timedelta(days=29),time.min,TZ).isoformat();days_30_end=datetime.combine(local_today+timedelta(days=1),time.min,TZ).isoformat()
+                count=lambda sql,args=():c.execute(sql,args).fetchone()[0]
+                counts={'shops':count('SELECT COUNT(*) FROM shops'),'pending_approvals':count("SELECT COUNT(*) FROM shops WHERE approval_status='pending'"),'active_shops':count("SELECT COUNT(*) FROM shops sh JOIN users u ON u.id=sh.user_id JOIN subscriptions sub ON sub.shop_id=sh.id WHERE u.status='active' AND sh.approval_status='approved' AND sh.listing_enabled=1 AND sub.status IN ('active','trialing') AND julianday(sub.paid_until)>julianday(?)",(now.isoformat(),)),'active_subscriptions':count("SELECT COUNT(*) FROM subscriptions WHERE status IN ('active','trialing') AND julianday(paid_until)>julianday(?)",(now.isoformat(),)),'expired_subscriptions':count("SELECT COUNT(*) FROM subscriptions WHERE status IN ('active','trialing','past_due') AND paid_until IS NOT NULL AND julianday(paid_until)<=julianday(?)",(now.isoformat(),)),'subscriptions_expiring_7':count("SELECT COUNT(*) FROM subscriptions WHERE status IN ('active','trialing') AND julianday(paid_until)>julianday(?) AND julianday(paid_until)<=julianday(?)",(now.isoformat(),(now+timedelta(days=7)).isoformat())),'subscriptions_expiring_30':count("SELECT COUNT(*) FROM subscriptions WHERE status IN ('active','trialing') AND julianday(paid_until)>julianday(?) AND julianday(paid_until)<=julianday(?)",(now.isoformat(),(now+timedelta(days=30)).isoformat())),'customers':count('SELECT COUNT(*) FROM customers'),'new_shops_30':count('SELECT COUNT(*) FROM shops WHERE created>=?',(days_30_start,)),'new_customers_30':count('SELECT COUNT(*) FROM customers WHERE created>=?',(days_30_start,)),'bookings':count('SELECT COUNT(*) FROM bookings'),'bookings_today':count("SELECT COUNT(*) FROM bookings WHERE status='confirmed' AND starts>=? AND starts<?",(today_start,today_end)),'pending_confirmations':count("SELECT COUNT(*) FROM bookings WHERE status='pending'"),'failed_payments':count("SELECT COUNT(*) FROM payments WHERE status='failed'"),'refund_count':count("SELECT COUNT(*) FROM refunds WHERE status IN ('succeeded','pending')"),'monthly_platform_revenue':count("SELECT COALESCE(SUM(MAX(0,amount-refunded_amount)),0) FROM payments WHERE status='paid' AND currency='ron' AND paid_at>=?",(month_start,)),'monthly_platform_gross':count("SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='paid' AND currency='ron' AND paid_at>=?",(month_start,)),'monthly_refunds':count("SELECT COALESCE(SUM(amount),0) FROM refunds WHERE status='succeeded' AND currency='ron' AND created>=?",(month_start,)),'cancellations_30':count("SELECT COUNT(*) FROM bookings WHERE status='cancelled' AND created>=?",(days_30_start,)),'bookings_created_30':count('SELECT COUNT(*) FROM bookings WHERE created>=?',(days_30_start,)),'returning_customers':count('SELECT COUNT(*) FROM (SELECT customer_id FROM bookings WHERE customer_id IS NOT NULL GROUP BY customer_id HAVING COUNT(*)>1)')}
+                counts['cancellation_rate_30']=round(counts['cancellations_30']/counts['bookings_created_30']*100,1) if counts['bookings_created_30'] else 0
+                owners=c.execute('SELECT u.id,u.email,u.owner,u.created,u.last_login,u.status,sh.name shop_name,sh.city,sub.plan,sub.status subscription_status,sub.paid_until FROM users u JOIN shops sh ON sh.user_id=u.id LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY u.created DESC').fetchall()
+                customers=c.execute('SELECT c.id,c.name,c.email,c.phone,c.created,c.last_login,c.status,COUNT(b.id) booking_count FROM customers c LEFT JOIN bookings b ON b.customer_id=c.id GROUP BY c.id ORDER BY c.created DESC').fetchall()
+                admins=c.execute('SELECT id,email,created,last_login FROM admins ORDER BY created').fetchall()
+                bookings=c.execute('SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.created,b.status,b.price_at_booking,sh.name shop_name,sh.city,s.name service_name,s.duration,t.name staff_name,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC LIMIT 500').fetchall()
+                subscriptions=c.execute('SELECT sh.id shop_id,sh.name shop_name,sh.city,sub.status,sub.plan,sub.current_period_start,sub.paid_until,sub.stripe_subscription_id FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sub.paid_until DESC').fetchall()
+                payments=c.execute('SELECT p.*,sh.name shop_name FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id ORDER BY COALESCE(p.paid_at,p.created) DESC LIMIT 500').fetchall()
+                refunds=c.execute('SELECT r.*,sh.name shop_name FROM refunds r LEFT JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
+                subscription_history=c.execute('SELECT h.*,sh.name shop_name FROM subscription_history h LEFT JOIN shops sh ON sh.id=h.shop_id ORDER BY h.event_created DESC LIMIT 200').fetchall()
+                booking_history=c.execute('SELECT a.*,b.client,sh.name shop_name FROM booking_audit a LEFT JOIN bookings b ON b.id=a.booking_id LEFT JOIN shops sh ON sh.id=a.shop_id ORDER BY a.created DESC LIMIT 500').fetchall()
+                daily_7=[];daily_30=[]
+                for offset in range(29,-1,-1):
+                    day=local_today-timedelta(days=offset);start=datetime.combine(day,time.min,TZ).isoformat();end=datetime.combine(day+timedelta(days=1),time.min,TZ).isoformat();point={'date':day.isoformat(),'count':count("SELECT COUNT(*) FROM bookings WHERE starts>=? AND starts<? AND status IN ('confirmed','completed')",(start,end))}
+                    daily_30.append(point)
+                    if offset<7:daily_7.append(point)
+                top_services=[dict(x) for x in c.execute("SELECT s.name service_name,COUNT(*) count FROM bookings b JOIN services s ON s.id=b.service_id WHERE b.created>=? AND b.status<>'cancelled' GROUP BY s.id ORDER BY count DESC LIMIT 5",(days_30_start,)).fetchall()]
+                top_shops=[dict(x) for x in c.execute("SELECT sh.name shop_name,COUNT(*) count FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.created>=? AND b.status<>'cancelled' GROUP BY sh.id ORDER BY count DESC LIMIT 5",(days_30_start,)).fetchall()]
+                activity=[]
+                activity.extend(dict(x,source='admin') for x in c.execute('SELECT a.id,a.admin_email,a.action,a.shop_id,a.details,a.created,sh.name shop_name FROM admin_audit a LEFT JOIN shops sh ON sh.id=a.shop_id ORDER BY a.created DESC LIMIT 15').fetchall())
+                activity.extend({'id':'signup-'+str(x['id']),'action':'shop_registered','shop_id':x['id'],'shop_name':x['name'],'created':x['created'],'source':'system'} for x in c.execute('SELECT id,name,created FROM shops WHERE created>=? ORDER BY created DESC LIMIT 10',( (now-timedelta(days=30)).isoformat(),)).fetchall())
+                activity.extend({'id':'expired-'+str(x['shop_id']),'action':'subscription_expired','shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['paid_until'],'source':'system'} for x in c.execute("SELECT sub.shop_id,sh.name shop_name,sub.paid_until FROM subscriptions sub JOIN shops sh ON sh.id=sub.shop_id WHERE sub.status IN ('active','trialing','past_due') AND sub.paid_until IS NOT NULL AND julianday(sub.paid_until)<=julianday(?) AND julianday(sub.paid_until)>=julianday(?) ORDER BY sub.paid_until DESC LIMIT 10",(now.isoformat(),(now-timedelta(days=30)).isoformat())).fetchall())
+                activity.extend({'id':'failed-'+str(x['id']),'action':'payment_failed','shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'source':'system'} for x in c.execute("SELECT p.id,p.shop_id,sh.name shop_name,p.created FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id WHERE p.status='failed' ORDER BY p.created DESC LIMIT 10").fetchall())
+                activity.extend({'id':'booking-'+str(x['id']),'action':x['action'],'shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'actor_type':x['actor_type'],'source':'booking'} for x in c.execute("SELECT a.id,a.action,a.shop_id,sh.name shop_name,a.created,a.actor_type FROM booking_audit a LEFT JOIN shops sh ON sh.id=a.shop_id WHERE a.action='booking_cancelled' ORDER BY a.created DESC LIMIT 10").fetchall())
+                activity=sorted(activity,key=lambda x:x.get('created') or '',reverse=True)[:30]
+                return self.json_response(200,{'counts':counts,'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'admins':[dict(x) for x in admins],'bookings':[dict(x) for x in bookings],'subscriptions':[dict(x) for x in subscriptions],'subscription_history':[dict(x) for x in subscription_history],'payments':[dict(x) for x in payments],'refunds':[dict(x) for x in refunds],'booking_history':[dict(x) for x in booking_history],'activity':activity,'booking_activity':daily_7,'booking_activity_30':daily_30,'top_services':top_services,'top_shops':top_shops})
         if path=='/api/public/shops':
             term=search_norm(q.get('q',[''])[0]).strip()
             with connect() as c:
@@ -408,6 +492,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/client/reviews':return self.create_review(self.body_json())
             if path=='/api/client/account/delete':return self.delete_client_account()
             if path=='/api/admin/listing':return self.admin_listing(self.body_json())
+            if path=='/api/admin/account':return self.admin_account(self.body_json())
+            if path=='/api/admin/shop':return self.admin_shop_update(self.body_json())
+            if path=='/api/admin/approval':return self.admin_shop_approval(self.body_json())
             if path=='/api/manage/photos':return self.upload_photo(self.body_json())
             if path=='/api/manage/staff-photo':return self.upload_staff_photo(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
@@ -487,7 +574,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             slug=slugify(d['name']); base=slug; n=2
             while c.execute('SELECT 1 FROM shops WHERE slug=?',(slug,)).fetchone():slug=f'{base}-{n}';n+=1
             cur=c.execute('INSERT INTO users(email,password,owner,created) VALUES(?,?,?,?)',(d['email'].lower().strip(),password_hash(d['password']),d['owner'].strip(),iso_now())); uid=cur.lastrowid
-            cur=c.execute('INSERT INTO shops(user_id,name,slug,city,address,phone,tagline,created) VALUES(?,?,?,?,?,?,?,?)',(uid,d['name'].strip(),slug,d['city'].strip(),d['address'].strip(),d['phone'].strip(),d.get('tagline',''),iso_now())); sid=cur.lastrowid
+            cur=c.execute("INSERT INTO shops(user_id,name,slug,city,address,phone,tagline,created,approval_status) VALUES(?,?,?,?,?,?,?,?, 'pending')",(uid,d['name'].strip(),slug,d['city'].strip(),d['address'].strip(),d['phone'].strip(),d.get('tagline',''),iso_now())); sid=cur.lastrowid
             c.execute("INSERT INTO subscriptions(shop_id,status,plan) VALUES(?,'active','free')",(sid,)); c.execute('INSERT INTO settings(shop_id) VALUES(?)',(sid,))
             c.execute('INSERT INTO services(shop_id,name,description,duration,price,active) VALUES(?,?,?,?,?,1)',(sid,'Tuns clasic','Tuns și styling',30,60))
             # Add an owner barber with a weekday schedule; services remain owner-configurable.
@@ -532,9 +619,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c:c.execute('UPDATE staff SET photo=? WHERE id=? AND shop_id=?',(url,staff['id'],user['shop_id']))
         return self.json_response(201,{'ok':True,'url':url})
     def login(self,d):
+        email=str(d.get('email','')).lower().strip();key=login_limit_key('barber',email)
         with connect() as c:
-            user=c.execute('SELECT * FROM users WHERE email=?',(str(d.get('email','')).lower().strip(),)).fetchone()
-            if not user or not password_ok(str(d.get('password','')),user['password']):return self.json_response(401,{'error':'E-mailul sau parola nu sunt corecte.'})
+            if login_is_limited(c,key):return self.json_response(429,{'error':'Prea multe încercări. Așteaptă 15 minute și încearcă din nou.'})
+            user=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+            if not user or user['status']!='active' or not password_ok(str(d.get('password','')),user['password']):login_failure(c,key);return self.json_response(401,{'error':'E-mailul sau parola nu sunt corecte.'})
+            login_success(c,key);c.execute('UPDATE users SET last_login=? WHERE id=?',(iso_now(),user['id']))
         return self.json_response(200,{'ok':True},self.set_session(user['id']))
     def request_password_reset(self,d):
         email=str(d.get('email','')).strip().lower()
@@ -600,13 +690,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             customer_id=cur.lastrowid
         return self.json_response(201,{'ok':True},self.set_client_session(customer_id))
     def client_login(self,d):
-        with connect() as c:customer=c.execute('SELECT * FROM customers WHERE email=?',(str(d.get('email','')).lower().strip(),)).fetchone()
-        if not customer or not password_ok(str(d.get('password','')),customer['password']):return self.json_response(401,{'error':'E-mailul sau parola nu sunt corecte.'})
+        email=str(d.get('email','')).lower().strip();key=login_limit_key('client',email)
+        with connect() as c:
+            if login_is_limited(c,key):return self.json_response(429,{'error':'Prea multe încercări. Așteaptă 15 minute și încearcă din nou.'})
+            customer=c.execute('SELECT * FROM customers WHERE email=?',(email,)).fetchone()
+            if not customer or customer['status']!='active' or not password_ok(str(d.get('password','')),customer['password']):login_failure(c,key);return self.json_response(401,{'error':'E-mailul sau parola nu sunt corecte.'})
+            login_success(c,key);c.execute('UPDATE customers SET last_login=? WHERE id=?',(iso_now(),customer['id']))
         return self.json_response(200,{'ok':True},self.set_client_session(customer['id']))
     def admin_login(self,d):
-        email=str(d.get('email','')).lower().strip()
-        with connect() as c:admin=c.execute('SELECT * FROM admins WHERE email=?',(email,)).fetchone()
-        if not admin or not password_ok(str(d.get('password','')),admin['password']):return self.json_response(401,{'error':'E-mailul sau parola de administrator nu sunt corecte.'})
+        email=str(d.get('email','')).lower().strip();key=login_limit_key('admin',email)
+        with connect() as c:
+            if login_is_limited(c,key):return self.json_response(429,{'error':'Prea multe încercări. Așteaptă 15 minute și încearcă din nou.'})
+            admin=c.execute('SELECT * FROM admins WHERE email=?',(email,)).fetchone()
+            if not admin or not password_ok(str(d.get('password','')),admin['password']):login_failure(c,key);return self.json_response(401,{'error':'E-mailul sau parola de administrator nu sunt corecte.'})
+            login_success(c,key);c.execute('UPDATE admins SET last_login=? WHERE id=?',(iso_now(),admin['id']))
         return self.json_response(200,{'ok':True},self.set_admin_session(admin['id']))
     def client_favorite(self,d):
         with connect() as c:
@@ -625,6 +722,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not row:return self.json_response(404,{'error':'Programarea viitoare nu a fost găsită.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea nu mai poate fi anulată din cont. Sună frizeria.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
+            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=customer['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
         try:send_email(customer['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta a fost anulată. Pentru o nouă rezervare, caută frizeria în TunsPro.')
         except Exception as e:print('Client cancellation notice failed:',repr(e))
         return self.json_response(200,{'ok':True})
@@ -651,10 +749,65 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return self.json_response(201,{'ok':True})
     def admin_listing(self,d):
         with connect() as c:
-            if not self.admin_auth(c):return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
-            c.execute('UPDATE shops SET listing_enabled=? WHERE id=?',(int(bool(d.get('enabled'))),int(d.get('shop_id',0))))
-            if not c.total_changes:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            shop_id=int(d.get('shop_id',0)); shop=c.execute('SELECT listing_enabled FROM shops WHERE id=?',(shop_id,)).fetchone()
+            if not shop:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
+            enabled=bool(d.get('enabled'))
+            if bool(shop['listing_enabled'])==enabled:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE shops SET listing_enabled=? WHERE id=?',(int(enabled),shop_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'shop_listing_enabled' if enabled else 'shop_listing_hidden',shop_id,json.dumps({'enabled':enabled}),iso_now()))
         return self.json_response(200,{'ok':True})
+    def admin_account(self,d):
+        account_type=str(d.get('account_type',''));status=str(d.get('status',''));account_id=int(d.get('account_id',0))
+        if account_type not in ('barber','client') or status not in ('active','suspended') or account_id<1:return self.json_response(400,{'error':'Tipul, contul sau statusul nu sunt valide.'})
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            table='users' if account_type=='barber' else 'customers'
+            row=c.execute(f'SELECT id,status FROM {table} WHERE id=?',(account_id,)).fetchone()
+            if not row:return self.json_response(404,{'error':'Contul nu a fost găsit.'})
+            if row['status']==status:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute(f'UPDATE {table} SET status=? WHERE id=?',(status,account_id))
+            if status=='suspended':
+                session_table='sessions' if account_type=='barber' else 'client_sessions';owner_field='user_id' if account_type=='barber' else 'customer_id'
+                c.execute(f'DELETE FROM {session_table} WHERE {owner_field}=?',(account_id,))
+            shop_id=None
+            if account_type=='barber':
+                shop=c.execute('SELECT id FROM shops WHERE user_id=?',(account_id,)).fetchone();shop_id=shop['id'] if shop else None
+            action='account_suspended' if status=='suspended' else 'account_reactivated'
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],action,shop_id,json.dumps({'account_type':account_type,'account_id':account_id}),iso_now()))
+        return self.json_response(200,{'ok':True,'status':status})
+    def admin_shop_update(self,d):
+        try:shop_id=int(d.get('shop_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Frizeria aleasă nu este validă.'})
+        values={key:str(d.get(key,'')).strip() for key in ('name','city','address','phone')}
+        if shop_id<1 or any(not value for value in values.values()) or len(values['name'])>120 or len(values['city'])>100 or len(values['address'])>240 or len(values['phone'])>30:return self.json_response(400,{'error':'Verifică numele, localitatea, adresa și telefonul.'})
+        if len(''.join(ch for ch in values['phone'] if ch.isdigit()))<8:return self.json_response(400,{'error':'Introdu un număr de telefon valid.'})
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            shop=c.execute('SELECT name,city,address,phone FROM shops WHERE id=?',(shop_id,)).fetchone()
+            if not shop:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
+            before=dict(shop)
+            if before==values:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE shops SET name=?,city=?,address=?,phone=? WHERE id=?',(values['name'],values['city'],values['address'],values['phone'],shop_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'shop_details_updated',shop_id,json.dumps({'before':before,'after':values},ensure_ascii=False),iso_now()))
+        return self.json_response(200,{'ok':True,'changed':True})
+    def admin_shop_approval(self,d):
+        try:shop_id=int(d.get('shop_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Frizeria aleasă nu este validă.'})
+        status=str(d.get('status',''))
+        if shop_id<1 or status not in ('approved','rejected'):return self.json_response(400,{'error':'Aprobarea aleasă nu este validă.'})
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            shop=c.execute('SELECT approval_status,listing_enabled FROM shops WHERE id=?',(shop_id,)).fetchone()
+            if not shop:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
+            if shop['approval_status']==status:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE shops SET approval_status=?,listing_enabled=CASE WHEN ?=\'rejected\' THEN 0 ELSE listing_enabled END WHERE id=?',(status,status,shop_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'shop_'+status,shop_id,json.dumps({'from':shop['approval_status'],'to':status}),iso_now()))
+        return self.json_response(200,{'ok':True,'status':status})
     def create_booking(self,d):
         client_name=str(d.get('client','')).strip();client_email=str(d.get('email','')).strip().lower()
         client_phone=normalize_ro_mobile(str(d.get('phone','')))
@@ -665,8 +818,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if starts<=datetime.now(TZ):raise ValueError('Alege o oră viitoare.')
         with connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            shop=c.execute('SELECT * FROM shops WHERE slug=?',(slug,)).fetchone(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone() if shop else None
-            if not shop or not shop['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă programări momentan.'})
+            shop=c.execute('SELECT sh.*,u.status owner_status FROM shops sh JOIN users u ON u.id=sh.user_id WHERE sh.slug=?',(slug,)).fetchone(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone() if shop else None
+            if not shop or shop['owner_status']!='active' or shop['approval_status']!='approved' or not shop['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă programări momentan.'})
             service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(int(d.get('service_id',0)),shop['id'])).fetchone(); staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(int(d.get('staff_id',0)),shop['id'])).fetchone()
             if not service or not staff:raise ValueError('Serviciul sau frizerul nu este disponibil.')
             sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()))
@@ -680,6 +833,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:reminder_sent=1
             cancel_token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(cancel_token.encode()).hexdigest()
             cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price'],token_hash)); booking_id=cur.lastrowid
+            record_booking_event(c,booking_id,shop['id'],'booking_created','client')
             opts=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone(); owner=c.execute('SELECT u.email FROM users u WHERE u.id=?',(shop['user_id'],)).fetchone()
         days_ro=['luni','marți','miercuri','joi','vineri','sâmbătă','duminică']
         months_ro=['ianuarie','februarie','martie','aprilie','mai','iunie','iulie','august','septembrie','octombrie','noiembrie','decembrie']
@@ -724,11 +878,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if starts<=datetime.now(TZ):return self.json_response(400,{'error':'Alege o oră viitoare.'})
         with connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            row=c.execute("SELECT b.*,sh.name shop_name,sh.slug shop_slug,sh.address,sh.city,sh.phone shop_phone,sh.listing_enabled,s.name old_service_name,t.name old_staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.slug shop_slug,sh.address,sh.city,sh.phone shop_phone,sh.listing_enabled,sh.approval_status,u.status owner_status,s.name old_service_name,t.name old_staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN users u ON u.id=sh.user_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi modificată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi modificată online.'})
             sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(row['shop_id'],)).fetchone()
-            if not row['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă modificări online momentan. Contactează frizeria direct.'})
+            if row['owner_status']!='active' or row['approval_status']!='approved' or not row['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă modificări online momentan. Contactează frizeria direct.'})
             service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(service_id,row['shop_id'])).fetchone()
             staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(staff_id,row['shop_id'])).fetchone()
             if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu mai este disponibil.'})
@@ -741,6 +895,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if starts>now_utc()+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
                 else:reminder_sent=1
             c.execute('UPDATE bookings SET service_id=?,staff_id=?,starts=?,ends=?,price_at_booking=?,reminder_at=?,reminder_sent=? WHERE id=?',(service['id'],staff['id'],starts.isoformat(),finish.isoformat(),service['price'],reminder_at.isoformat() if not reminder_sent else None,reminder_sent,row['id']))
+            record_booking_event(c,row['id'],row['shop_id'],'booking_rescheduled','client',old_starts=row['starts'],new_starts=starts.isoformat(),old_status='confirmed',new_status='confirmed')
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
             client_email=row['email'];client_phone=row['phone'];client=row['client'];shop_name=row['shop_name'];shop_phone=row['shop_phone'];old_starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         when=starts.strftime('%d.%m.%Y, %H:%M');manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+token;reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+token
@@ -768,6 +923,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi anulată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi anulată online.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
+            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=row['customer_id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         if row['email'] and email_configured():
@@ -789,6 +945,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             row=c.execute("SELECT b.*,s.name service_name,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.id=? AND b.shop_id=? AND b.status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu a fost găsită.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
+            record_booking_event(c,row['id'],user['shop_id'],'booking_cancelled','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
             client_email=row['email'];client_phone=row['phone'];client=row['client'];starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M'); shop_name=user['shop_name']
         try:
             if client_email:send_email(client_email,f'Programare anulată — {shop_name}',f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie.')
@@ -805,6 +962,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not row:return self.json_response(404,{'error':'Programarea nu a fost găsită.'})
             if datetime.fromisoformat(row['ends'])>now_utc():return self.json_response(400,{'error':'Programarea poate fi încheiată după ora rezervată.'})
             c.execute("UPDATE bookings SET status='completed' WHERE id=?",(row['id'],))
+            record_booking_event(c,row['id'],user['shop_id'],'booking_completed','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='completed')
         return self.json_response(200,{'ok':True})
     def checkout(self):
         with connect() as c:
@@ -840,21 +998,67 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try: fresh=abs(datetime.now().timestamp()-int(timestamp))<300
         except ValueError:fresh=False
         if not fresh or not any(hmac.compare_digest(expected,candidate) for candidate in signatures):return self.json_response(400,{'error':'Semnătură invalidă.'})
-        event=json.loads(raw); obj=event.get('data',{}).get('object',{}); typ=event.get('type','')
-        with connect() as c:
-            if typ=='checkout.session.completed' and obj.get('mode')=='subscription':
-                sid=int(obj.get('metadata',{}).get('shop_id','0') or 0); stripe_sub=obj.get('subscription'); status='active' if obj.get('payment_status')=='paid' else 'incomplete'; plan=obj.get('metadata',{}).get('plan','pro')
-                details=stripe_subscription_details(stripe_sub) if status=='active' and stripe_sub else None
-                paid_until=datetime.fromtimestamp(details['current_period_end'],timezone.utc).isoformat() if details and details.get('current_period_end') else None
-                if sid and plan in PLAN_PRICES:c.execute('UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until) WHERE shop_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,sid))
-            elif typ.startswith('customer.subscription.') or typ.startswith('invoice.payment_'):
-                stripe_sub=obj.get('id') if typ.startswith('customer.subscription.') else obj.get('subscription'); status=('active' if typ=='invoice.payment_succeeded' else obj.get('status','active')); paid_until=datetime.fromtimestamp(obj.get('current_period_end',0),timezone.utc).isoformat() if obj.get('current_period_end') else None
-                item_plans=[x.get('price',{}).get('metadata',{}).get('plan') for x in obj.get('items',{}).get('data',[]) if x.get('price',{}).get('metadata',{}).get('plan') in PLAN_PRICES]
-                plan=(item_plans[0] if item_plans else None) or obj.get('metadata',{}).get('plan')
-                if typ=='invoice.payment_failed':status='past_due'
-                cur=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=COALESCE(?,stripe_customer_id),stripe_subscription_id=COALESCE(?,stripe_subscription_id),paid_until=COALESCE(?,paid_until) WHERE stripe_subscription_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,stripe_sub))
-                if cur.rowcount==0 and obj.get('metadata',{}).get('shop_id'):
-                    c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until) WHERE shop_id=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,int(obj['metadata']['shop_id'])))
+        try:event=json.loads(raw)
+        except (ValueError,UnicodeDecodeError):return self.json_response(400,{'error':'Eveniment Stripe invalid.'})
+        event_id=str(event.get('id',''));typ=str(event.get('type',''));event_created=int(event.get('created',0) or 0);obj=event.get('data',{}).get('object',{})
+        if not event_id or not typ or not isinstance(obj,dict):return self.json_response(400,{'error':'Eveniment Stripe incomplet.'})
+        received=iso_now();checkout_sub=obj.get('subscription') if typ=='checkout.session.completed' and obj.get('mode')=='subscription' else None
+        checkout_details=stripe_subscription_details(checkout_sub) if checkout_sub and obj.get('payment_status')=='paid' else None
+        try:
+            with connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                inserted=c.execute('INSERT OR IGNORE INTO stripe_events(event_id,event_type,event_created,received) VALUES(?,?,?,?)',(event_id,typ,event_created,received)).rowcount
+                if not inserted:return self.json_response(200,{'received':True,'duplicate':True})
+                if typ=='checkout.session.completed' and obj.get('mode')=='subscription':
+                    shop_id=int(obj.get('metadata',{}).get('shop_id','0') or 0);stripe_sub=obj.get('subscription');status='active' if obj.get('payment_status')=='paid' else 'incomplete';plan=obj.get('metadata',{}).get('plan','pro')
+                    if shop_id and stripe_sub and plan in PLAN_PRICES:
+                        details=checkout_details or {};period_start=datetime.fromtimestamp(details['current_period_start'],timezone.utc).isoformat() if details.get('current_period_start') else None;paid_until=datetime.fromtimestamp(details['current_period_end'],timezone.utc).isoformat() if details.get('current_period_end') else None
+                        updated=c.execute("UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,stripe_event_created=?,current_period_start=COALESCE(?,current_period_start),paid_until=COALESCE(?,paid_until) WHERE shop_id=? AND stripe_event_created<=?",(status,plan,obj.get('customer'),stripe_sub,event_created,period_start,paid_until,shop_id,event_created))
+                        if updated.rowcount:record_subscription_event(c,event_id,typ,event_created,shop_id,stripe_sub,status,plan,period_start,paid_until)
+                elif typ.startswith('customer.subscription.'):
+                    stripe_sub=obj.get('id');status=obj.get('status','active');paid_until=datetime.fromtimestamp(obj['current_period_end'],timezone.utc).isoformat() if obj.get('current_period_end') else None;period_start=datetime.fromtimestamp(obj['current_period_start'],timezone.utc).isoformat() if obj.get('current_period_start') else None
+                    item_plans=[x.get('price',{}).get('metadata',{}).get('plan') for x in obj.get('items',{}).get('data',[]) if x.get('price',{}).get('metadata',{}).get('plan') in PLAN_PRICES]
+                    plan=(item_plans[0] if item_plans else None) or obj.get('metadata',{}).get('plan');shop_id=int(obj.get('metadata',{}).get('shop_id','0') or 0)
+                    if stripe_sub:
+                        updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=COALESCE(?,stripe_customer_id),paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),paid_until,period_start,event_created,stripe_sub,event_created))
+                        if updated.rowcount==0 and shop_id:
+                            updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),stripe_event_created=? WHERE shop_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,period_start,event_created,shop_id,event_created))
+                        if updated.rowcount:
+                            linked=c.execute('SELECT shop_id,plan FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone()
+                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else shop_id,stripe_sub,status,plan or (linked['plan'] if linked else None),period_start,paid_until)
+                elif typ in ('invoice.payment_succeeded','invoice.payment_failed'):
+                    invoice_id=obj.get('id');stripe_sub=obj.get('subscription');stripe_sub=stripe_sub.get('id') if isinstance(stripe_sub,dict) else stripe_sub
+                    if not stripe_sub:stripe_sub=(obj.get('parent',{}).get('subscription_details',{}) or {}).get('subscription')
+                    if isinstance(stripe_sub,dict):stripe_sub=stripe_sub.get('id')
+                    paid=typ=='invoice.payment_succeeded';amount=int(obj.get('amount_paid',0) if paid else obj.get('amount_due',0));currency=str(obj.get('currency','ron')).lower();paid_at=datetime.fromtimestamp(obj.get('status_transitions',{}).get('paid_at') or event_created,timezone.utc).isoformat() if paid else None
+                    if invoice_id:
+                        shop=c.execute('SELECT shop_id FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone() if stripe_sub else None
+                        metadata=obj.get('metadata',{}) or {};shop_id=shop['shop_id'] if shop else int(metadata.get('shop_id','0') or 0) or None
+                        c.execute('''INSERT INTO payments(stripe_invoice_id,shop_id,stripe_customer_id,stripe_subscription_id,amount,currency,status,paid_at,invoice_url,created,stripe_event_created,stripe_payment_intent_id)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(stripe_invoice_id) DO UPDATE SET shop_id=COALESCE(excluded.shop_id,payments.shop_id),stripe_customer_id=COALESCE(excluded.stripe_customer_id,payments.stripe_customer_id),stripe_subscription_id=COALESCE(excluded.stripe_subscription_id,payments.stripe_subscription_id),amount=excluded.amount,currency=excluded.currency,status=CASE WHEN payments.refunded_amount>=excluded.amount AND payments.refunded_amount>0 THEN 'refunded' WHEN payments.refunded_amount>0 THEN 'partially_refunded' ELSE excluded.status END,paid_at=COALESCE(excluded.paid_at,payments.paid_at),invoice_url=COALESCE(excluded.invoice_url,payments.invoice_url),stripe_event_created=excluded.stripe_event_created,stripe_payment_intent_id=COALESCE(excluded.stripe_payment_intent_id,payments.stripe_payment_intent_id) WHERE excluded.stripe_event_created>=payments.stripe_event_created''',
+                            (invoice_id,shop_id,obj.get('customer'),stripe_sub,amount,currency,'paid' if paid else 'failed',paid_at,obj.get('hosted_invoice_url'),received,event_created,obj.get('payment_intent')))
+                    if stripe_sub:
+                        new_status='active' if paid else 'past_due'
+                        updated=c.execute("UPDATE subscriptions SET status=CASE WHEN status='canceled' THEN status ELSE ? END,stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?",(new_status,event_created,stripe_sub,event_created))
+                        if updated.rowcount:
+                            linked=c.execute('SELECT shop_id,plan,current_period_start,paid_until,status FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone()
+                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else None,stripe_sub,linked['status'] if linked else new_status,linked['plan'] if linked else None,linked['current_period_start'] if linked else None,linked['paid_until'] if linked else None)
+                elif typ=='charge.refunded':
+                    charge_id=obj.get('id');invoice_id=obj.get('invoice');payment_intent=obj.get('payment_intent');invoice_id=invoice_id.get('id') if isinstance(invoice_id,dict) else invoice_id;payment_intent=payment_intent.get('id') if isinstance(payment_intent,dict) else payment_intent;currency=str(obj.get('currency','ron')).lower();refund_items=(obj.get('refunds',{}) or {}).get('data',[])
+                    for refund in refund_items:
+                        refund_id=refund.get('id')
+                        if not refund_id:continue
+                        payment=c.execute('SELECT stripe_invoice_id,shop_id,amount,refunded_amount FROM payments WHERE stripe_invoice_id=? OR stripe_payment_intent_id=? ORDER BY CASE WHEN stripe_invoice_id=? THEN 0 ELSE 1 END LIMIT 1',(invoice_id,payment_intent,invoice_id)).fetchone() if invoice_id or payment_intent else None
+                        c.execute('INSERT OR IGNORE INTO refunds(stripe_refund_id,stripe_invoice_id,stripe_charge_id,shop_id,amount,currency,status,created) VALUES(?,?,?,?,?,?,?,?)',(refund_id,payment['stripe_invoice_id'] if payment else invoice_id,charge_id,payment['shop_id'] if payment else None,int(refund.get('amount',0)),currency,refund.get('status','succeeded'),datetime.fromtimestamp(refund.get('created',event_created),timezone.utc).isoformat()))
+                    if invoice_id or payment_intent:
+                        payment=c.execute('SELECT stripe_invoice_id,amount FROM payments WHERE stripe_invoice_id=? OR stripe_payment_intent_id=? ORDER BY CASE WHEN stripe_invoice_id=? THEN 0 ELSE 1 END LIMIT 1',(invoice_id,payment_intent,invoice_id)).fetchone()
+                        if payment:
+                            refund_total=max(c.execute("SELECT COALESCE(SUM(amount),0) FROM refunds WHERE stripe_invoice_id=? AND status='succeeded'",(payment['stripe_invoice_id'],)).fetchone()[0],int(obj.get('amount_refunded',0) or 0))
+                            pay_status='refunded' if refund_total>=payment['amount'] and payment['amount']>0 else 'partially_refunded' if refund_total else 'paid'
+                            c.execute('UPDATE payments SET refunded_amount=?,status=? WHERE stripe_invoice_id=?',(refund_total,pay_status,payment['stripe_invoice_id']))
+        except (TypeError,ValueError,KeyError) as e:
+            print('Stripe webhook payload rejected:',type(e).__name__,flush=True)
+            return self.json_response(400,{'error':'Datele evenimentului Stripe nu sunt valide.'})
         return self.json_response(200,{'received':True})
 
 if __name__=='__main__':
