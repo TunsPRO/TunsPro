@@ -1,6 +1,6 @@
-"""TunsPro MVP API. Python standard library + SQLite; Stripe/SMTP/Twilio are optional via .env."""
+"""TunsPro MVP API. Python standard library + SQLite; Stripe/email/Twilio are optional via .env."""
 from __future__ import annotations
-import base64, hashlib, hmac, http.server, json, os, re, secrets, smtplib, sqlite3, ssl, urllib.parse, urllib.request, uuid
+import base64, hashlib, hmac, http.server, json, os, re, secrets, smtplib, sqlite3, ssl, urllib.error, urllib.parse, urllib.request, uuid
 import unicodedata
 import threading
 from datetime import date, datetime, time, timedelta, timezone
@@ -90,8 +90,8 @@ def send_due_reminders():
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         body=f'Reamintire TunsPro: ai programare la {row["shop_name"]} pe {when}, pentru {row["service_name"]} cu {row["staff_name"]}. Adresă: {row["address"]}, {row["city"]}.'
         attempted=False
-        if row['notification_email'] and row['email'] and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(row['email'],f'Reamintire programare — {row["shop_name"]}',body);attempted=True
+        if row['notification_email'] and row['email'] and email_configured():
+            try:send_email(row['email'],f'Reamintire programare — {row["shop_name"]}',body);attempted=True
             except Exception as e:print('Email reminder failed:',repr(e))
         if row['notification_sms'] and row['phone'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(row['phone'],body);attempted=True
@@ -177,15 +177,45 @@ def normalize_ro_mobile(value):
     if not digits.startswith('40'):return ''
     return '+'+digits if re.fullmatch(r'407[0-9]{8}',digits) else ''
 
-def smtp_notice(to_email, subject, body):
-    host=os.environ.get('SMTP_HOST'); sender=os.environ.get('SMTP_FROM');
-    if not host or not sender or not to_email: return
+def email_configured():
+    resend_key=os.environ.get('RESEND_API_KEY','').strip()
+    resend_from=os.environ.get('RESEND_FROM','').strip()
+    if resend_key or resend_from:
+        return bool(resend_key and resend_from)
+    return bool(os.environ.get('SMTP_HOST','').strip() and os.environ.get('SMTP_FROM','').strip())
+
+def email_provider():
+    return 'Resend' if os.environ.get('RESEND_API_KEY','').strip() else 'SMTP'
+
+def send_email(to_email, subject, body):
+    if not to_email: raise ValueError('Missing email recipient')
+    resend_key=os.environ.get('RESEND_API_KEY','').strip()
+    resend_from=os.environ.get('RESEND_FROM','').strip()
+    if resend_key or resend_from:
+        if not resend_key or not resend_from:
+            raise RuntimeError('Resend requires both RESEND_API_KEY and RESEND_FROM')
+        payload=json.dumps({'from':resend_from,'to':[to_email],'subject':subject,'text':body}).encode()
+        req=urllib.request.Request('https://api.resend.com/emails',data=payload,headers={'Authorization':'Bearer '+resend_key,'Content-Type':'application/json'})
+        try:
+            with urllib.request.urlopen(req,timeout=20) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f'Resend returned HTTP {response.status}')
+                response.read()
+        except urllib.error.HTTPError as e:
+            detail=e.read().decode('utf-8','replace')[:500]
+            raise RuntimeError(f'Resend returned HTTP {e.code}: {detail}') from None
+        return 'resend'
+    host=os.environ.get('SMTP_HOST','').strip(); sender=os.environ.get('SMTP_FROM','').strip()
+    if not host or not sender: raise RuntimeError('E-mail is not configured')
     msg=EmailMessage(); msg['Subject']=subject; msg['From']=sender; msg['To']=to_email; msg.set_content(body)
     port=int(os.environ.get('SMTP_PORT','587')); user=os.environ.get('SMTP_USER',''); password=os.environ.get('SMTP_PASSWORD','')
-    with smtplib.SMTP(host,port,timeout=12) as s:
+    with smtplib.SMTP(host,port,timeout=20) as s:
+        s.ehlo()
         s.starttls(context=ssl.create_default_context())
+        s.ehlo()
         if user: s.login(user,password)
         s.send_message(msg)
+    return 'smtp'
 
 def sms_notice(phone, body):
     sid=os.environ.get('TWILIO_ACCOUNT_SID'); token=os.environ.get('TWILIO_AUTH_TOKEN'); sender=os.environ.get('TWILIO_FROM')
@@ -519,8 +549,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('INSERT INTO password_reset_limits(email_hash,requested) VALUES(?,?) ON CONFLICT(email_hash) DO UPDATE SET requested=excluded.requested',(email_hash,now.isoformat()))
             if allowed:
                 user=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
-                mail_ready=all(os.environ.get(key) for key in ('SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASSWORD','SMTP_FROM','PUBLIC_URL'))
-                print(f'Password reset request received: barber_account_match={bool(user)} smtp_config_complete={mail_ready}',flush=True)
+                mail_ready=email_configured() and bool(os.environ.get('PUBLIC_URL'))
+                print(f'Password reset request received: barber_account_match={bool(user)} email_configured={mail_ready} provider={email_provider() if mail_ready else "none"}',flush=True)
                 if user and mail_ready:
                     user_id=user['id'];token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(token.encode()).hexdigest()
                     c.execute('DELETE FROM password_resets WHERE user_id=? OR expires<=?',(user_id,now.isoformat()))
@@ -534,8 +564,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     @staticmethod
     def send_password_reset_email(email,reset_url):
         try:
-            smtp_notice(email,'Resetarea parolei TunsPro',f'Am primit o cerere de resetare a parolei contului tău TunsPro. Deschide linkul în următoarele 30 de minute pentru a alege o parolă nouă:\n\n{reset_url}\n\nDacă nu ai solicitat resetarea, ignoră acest mesaj. Parola nu se schimbă până când nu confirmi linkul.')
-            print('Password reset email accepted by SMTP server',flush=True)
+            provider=send_email(email,'Resetarea parolei TunsPro',f'Am primit o cerere de resetare a parolei contului tău TunsPro. Deschide linkul în următoarele 30 de minute pentru a alege o parolă nouă:\n\n{reset_url}\n\nDacă nu ai solicitat resetarea, ignoră acest mesaj. Parola nu se schimbă până când nu confirmi linkul.')
+            print(f'Password reset email accepted by {provider}',flush=True)
         except Exception as e:
             print(f'Password reset email failed: {type(e).__name__}: {e}',flush=True)
     def confirm_password_reset(self,d):
@@ -553,12 +583,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(password),user_id))
             c.execute('DELETE FROM password_resets WHERE user_id=?',(user_id,))
             c.execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
-        if email and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+        if email and email_configured():
             threading.Thread(target=self.send_password_changed_email,args=(email,),daemon=True).start()
         return self.json_response(200,{'ok':True,'message':'Parola a fost schimbată. Conectează-te cu parola nouă.'})
     @staticmethod
     def send_password_changed_email(email):
-        try:smtp_notice(email,'Parola contului TunsPro a fost schimbată','Parola contului tău TunsPro a fost schimbată. Dacă nu ai făcut tu această modificare, contactează-ne imediat la tunsprogramari@gmail.com.')
+        try:send_email(email,'Parola contului TunsPro a fost schimbată','Parola contului tău TunsPro a fost schimbată. Dacă nu ai făcut tu această modificare, contactează-ne imediat la tunsprogramari@gmail.com.')
         except Exception as e:print('Password change notification failed:',repr(e))
     def client_register(self,d):
         name=str(d.get('name','')).strip();email=str(d.get('email','')).lower().strip();phone=str(d.get('phone','')).strip();password=str(d.get('password',''))
@@ -595,7 +625,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not row:return self.json_response(404,{'error':'Programarea viitoare nu a fost găsită.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea nu mai poate fi anulată din cont. Sună frizeria.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
-        try:smtp_notice(customer['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta a fost anulată. Pentru o nouă rezervare, caută frizeria în TunsPro.')
+        try:send_email(customer['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta a fost anulată. Pentru o nouă rezervare, caută frizeria în TunsPro.')
         except Exception as e:print('Client cancellation notice failed:',repr(e))
         return self.json_response(200,{'ok':True})
     def delete_client_account(self):
@@ -657,9 +687,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+cancel_token
         reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+cancel_token
         mail_status='unavailable';sms_status='unavailable'
-        if os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
+        if email_configured():
             try:
-                smtp_notice(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
+                send_email(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
                 mail_status='sent'
             except Exception as e:mail_status='failed';print('Client confirmation failed:',repr(e))
         if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
@@ -667,8 +697,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este înregistrată pentru {when}. Anulare: {manage_url}. Modificare: {reschedule_url}.')
                 sms_status='sent'
             except Exception as e:sms_status='failed';print('Client SMS confirmation failed:',repr(e))
-        if opts and opts['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
+        if opts and opts['notification_email'] and owner and email_configured():
+            try:send_email(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
             except Exception as e:print('Barber email notification failed:',repr(e))
         if opts and opts['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
@@ -715,14 +745,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             client_email=row['email'];client_phone=row['phone'];client=row['client'];shop_name=row['shop_name'];shop_phone=row['shop_phone'];old_starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         when=starts.strftime('%d.%m.%Y, %H:%M');manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+token;reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+token
         mail_status='unavailable';sms_status='unavailable'
-        if client_email and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(client_email,f'Programare reprogramată — {shop_name}',f'Programarea ta a fost mutată de la {old_starts} la {when}, pentru {service["name"]} cu {staff["name"]}. Adresă: {row["address"]}, {row["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}.');mail_status='sent'
+        if client_email and email_configured():
+            try:send_email(client_email,f'Programare reprogramată — {shop_name}',f'Programarea ta a fost mutată de la {old_starts} la {when}, pentru {service["name"]} cu {staff["name"]}. Adresă: {row["address"]}, {row["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}.');mail_status='sent'
             except Exception as e:mail_status='failed';print('Client reschedule email failed:',repr(e))
         if client_phone and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(client_phone,f'TunsPro: programarea ta la {shop_name} a fost mutată pentru {when}, cu {staff["name"]}. Modificare: {reschedule_url}.');sms_status='sent'
             except Exception as e:sms_status='failed';print('Client reschedule SMS failed:',repr(e))
-        if settings and settings['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(owner['email'],f'Programare reprogramată — {shop_name}',f'{client} a reprogramat rezervarea din {old_starts} pentru {when}, cu {staff["name"]}. Telefon: {client_phone}.')
+        if settings and settings['notification_email'] and owner and email_configured():
+            try:send_email(owner['email'],f'Programare reprogramată — {shop_name}',f'{client} a reprogramat rezervarea din {old_starts} pentru {when}, cu {staff["name"]}. Telefon: {client_phone}.')
             except Exception as e:print('Shop reschedule email failed:',repr(e))
         if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(shop_phone,f'TunsPro: {client} a reprogramat rezervarea pentru {when}, cu {staff["name"]}.')
@@ -740,11 +770,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
-        if row['email'] and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(row['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta din {when} a fost anulată. Dacă te-ai răzgândit, poți face o nouă rezervare pe TunsPro.')
+        if row['email'] and email_configured():
+            try:send_email(row['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta din {when} a fost anulată. Dacă te-ai răzgândit, poți face o nouă rezervare pe TunsPro.')
             except Exception as e:print('Client cancellation confirmation failed:',repr(e))
-        if settings and settings['notification_email'] and owner and os.environ.get('SMTP_HOST') and os.environ.get('SMTP_FROM'):
-            try:smtp_notice(owner['email'],f'Programare anulată — {row["shop_name"]}',f'{row["client"]} a anulat programarea din {when}.')
+        if settings and settings['notification_email'] and owner and email_configured():
+            try:send_email(owner['email'],f'Programare anulată — {row["shop_name"]}',f'{row["client"]} a anulat programarea din {when}.')
             except Exception as e:print('Barber cancellation notice failed:',repr(e))
         if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(row['shop_phone'],f'TunsPro: clientul {row["client"]} a anulat programarea din {when}.')
@@ -761,7 +791,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
             client_email=row['email'];client_phone=row['phone'];client=row['client'];starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M'); shop_name=user['shop_name']
         try:
-            if client_email:smtp_notice(client_email,f'Programare anulată — {shop_name}',f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie.')
+            if client_email:send_email(client_email,f'Programare anulată — {shop_name}',f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie.')
             sms_notice(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata de frizerie.')
         except Exception as e:print('Cancellation notice failed:',repr(e))
         return self.json_response(200,{'ok':True})
