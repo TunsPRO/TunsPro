@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64, hashlib, hmac, http.server, json, os, re, secrets, smtplib, sqlite3, ssl, urllib.error, urllib.parse, urllib.request, uuid
 import unicodedata
+import ipaddress
 import threading
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
@@ -12,10 +13,12 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get('TUNSPRO_DB', ROOT / 'tunspro.sqlite3'))
 MEDIA_DIR = DB_PATH.parent / 'uploads'
+BACKUP_DIR = DB_PATH.parent / 'backups'
 PORT = int(os.environ.get('PORT', '8765'))
 TZ = ZoneInfo('Europe/Bucharest')
 PLAN_PRICES = {'pro': 4900, 'business': 9900}
 SUBSCRIPTION_GRACE_DAYS = max(0, min(30, int(os.environ.get('SUBSCRIPTION_GRACE_DAYS', '7'))))
+MAX_REQUEST_BYTES = 2_200_000
 
 def load_env():
     p = ROOT / '.env'
@@ -31,6 +34,50 @@ def connect():
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
     return c
+
+def create_database_backup(label='daily'):
+    """Create and verify an online SQLite snapshot outside the public web root."""
+    if not DB_PATH.is_file() or DB_PATH.stat().st_size == 0:
+        return None
+    BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stamp = datetime.now(TZ).strftime('%Y%m%d-%H%M%S')
+    target = BACKUP_DIR / f'tunspro-{label}-{stamp}.sqlite3'
+    temporary = target.with_suffix('.tmp')
+    try:
+        source = sqlite3.connect(DB_PATH, timeout=30)
+        destination = sqlite3.connect(temporary, timeout=30)
+        try:
+            source.backup(destination)
+            check = destination.execute('PRAGMA quick_check').fetchone()
+            destination.commit()
+        finally:
+            destination.close()
+            source.close()
+        if not check or check[0] != 'ok':
+            raise sqlite3.DatabaseError('backup integrity check failed')
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, target)
+        cutoff = datetime.now().timestamp() - 14 * 24 * 60 * 60
+        backups = sorted(BACKUP_DIR.glob('tunspro-*.sqlite3'), key=lambda p: p.stat().st_mtime, reverse=True)
+        for index, old in enumerate(backups):
+            if old != target and (old.stat().st_mtime < cutoff or index >= 14):
+                old.unlink(missing_ok=True)
+        return target
+    finally:
+        temporary.unlink(missing_ok=True)
+
+def database_backup_loop():
+    while True:
+        threading.Event().wait(24 * 60 * 60)
+        try:
+            created = create_database_backup('daily')
+            if created:
+                print('Daily database backup completed and verified.', flush=True)
+        except Exception as e:
+            print('Daily database backup failed:', type(e).__name__, flush=True)
 
 def init_db():
     with connect() as c:
@@ -49,6 +96,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, admin_email TEXT NOT NULL, action TEXT NOT NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, details TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS booking_audit(id INTEGER PRIMARY KEY, booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, action TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id INTEGER, old_starts TEXT, new_starts TEXT, old_status TEXT, new_status TEXT, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS login_limits(email_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL, blocked_until TEXT);
+        CREATE TABLE IF NOT EXISTS request_limits(bucket_hash TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS password_resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL, created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS password_resets_user ON password_resets(user_id);
@@ -105,7 +153,12 @@ def init_db():
         admin_email=os.environ.get('ADMIN_EMAIL','').lower().strip(); admin_password=os.environ.get('ADMIN_PASSWORD','')
         if admin_email and len(admin_password)>=16 and '@' in admin_email:
             c.execute('DELETE FROM admins WHERE email<>?',(admin_email,))
-            c.execute('INSERT INTO admins(email,password,created) VALUES(?,?,?) ON CONFLICT(email) DO UPDATE SET password=excluded.password',(admin_email,password_hash(admin_password),iso_now()))
+            existing=c.execute('SELECT id,password FROM admins WHERE email=?',(admin_email,)).fetchone()
+            if not existing:
+                c.execute('INSERT INTO admins(email,password,created) VALUES(?,?,?)',(admin_email,password_hash(admin_password),iso_now()))
+            elif not password_ok(admin_password,existing['password']):
+                c.execute('DELETE FROM admin_sessions WHERE admin_id=?',(existing['id'],))
+                c.execute('UPDATE admins SET password=? WHERE id=?',(password_hash(admin_password),existing['id']))
     anonymize_old_bookings()
 
 def anonymize_old_bookings():
@@ -155,6 +208,17 @@ def login_failure(c,key):
     failures=row['failures']+1;blocked=(now+timedelta(minutes=15)).isoformat() if failures>=10 else None
     c.execute('UPDATE login_limits SET failures=?,blocked_until=COALESCE(?,blocked_until) WHERE email_hash=?',(failures,blocked,key))
 def login_success(c,key): c.execute('DELETE FROM login_limits WHERE email_hash=?',(key,))
+def request_limit_allows(c,scope,identity,maximum,window_seconds):
+    key=hashlib.sha256((scope+':'+str(identity).strip().lower()).encode()).hexdigest();now=now_utc()
+    c.execute('BEGIN IMMEDIATE')
+    row=c.execute('SELECT requests,window_start FROM request_limits WHERE bucket_hash=?',(key,)).fetchone()
+    if not row or now-datetime.fromisoformat(row['window_start'])>=timedelta(seconds=window_seconds):
+        c.execute('INSERT INTO request_limits(bucket_hash,requests,window_start) VALUES(?,1,?) ON CONFLICT(bucket_hash) DO UPDATE SET requests=1,window_start=excluded.window_start',(key,now.isoformat()))
+        c.execute('DELETE FROM request_limits WHERE window_start<?',((now-timedelta(days=7)).isoformat(),))
+        return True
+    if row['requests']>=maximum:return False
+    c.execute('UPDATE request_limits SET requests=requests+1 WHERE bucket_hash=?',(key,))
+    return True
 def record_booking_event(c,booking_id,shop_id,action,actor_type,actor_id=None,old_starts=None,new_starts=None,old_status=None,new_status=None):
     c.execute('INSERT INTO booking_audit(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,iso_now()))
 def record_subscription_event(c,event_id,event_type,event_created,shop_id,stripe_sub,status,plan,period_start,period_end,cancel_at_period_end=False,cancel_at=None):
@@ -288,15 +352,60 @@ def sms_notice(phone, body):
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw): super().__init__(*a,directory=str(ROOT),**kw)
     def log_message(self, fmt, *args): print('%s - %s' % (self.address_string(), fmt % args))
+    def end_headers(self):
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('X-Frame-Options','DENY')
+        self.send_header('Referrer-Policy','strict-origin-when-cross-origin')
+        self.send_header('Permissions-Policy','camera=(), microphone=(), geolocation=()')
+        if os.environ.get('COOKIE_SECURE','0')=='1':self.send_header('Strict-Transport-Security','max-age=31536000')
+        super().end_headers()
     def json_response(self, status, payload, extra=None):
         body=json.dumps(payload,ensure_ascii=False).encode()
         self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(body))); self.send_header('Cache-Control','no-store')
         for k,v in (extra or {}).items(): self.send_header(k,v)
         self.end_headers(); self.wfile.write(body)
     def body_json(self):
-        n=int(self.headers.get('Content-Length','0'))
-        if n>2200000: raise ValueError('Cerere prea mare.')
-        return json.loads(self.rfile.read(n) or b'{}')
+        raw=self.read_request_body()
+        if not raw:return {}
+        content_type=self.headers.get('Content-Type','').split(';',1)[0].strip().lower()
+        if content_type!='application/json':raise ValueError('Tipul cererii nu este valid.')
+        payload=json.loads(raw)
+        if not isinstance(payload,dict):raise ValueError('Formatul cererii nu este valid.')
+        return payload
+    def read_request_body(self):
+        length=self.headers.get('Content-Length')
+        if length is None or not re.fullmatch(r'\d{1,8}',length.strip()):raise ValueError('Dimensiunea cererii nu este validă.')
+        n=int(length)
+        if n>MAX_REQUEST_BYTES:raise ValueError('Cerere prea mare.')
+        if self.headers.get('Transfer-Encoding'):raise ValueError('Formatul cererii nu este acceptat.')
+        raw=self.rfile.read(n) if n else b''
+        if len(raw)!=n:raise ValueError('Cererea este incompletă.')
+        return raw
+    def mutation_origin_valid(self):
+        origin=self.headers.get('Origin')
+        if not origin:return False
+        try:
+            parsed=urllib.parse.urlsplit(origin)
+            host=self.headers.get('Host','').lower().strip()
+            expected_scheme='https' if os.environ.get('COOKIE_SECURE','0')=='1' else parsed.scheme.lower()
+            return parsed.scheme.lower()==expected_scheme and parsed.netloc.lower()==host and parsed.path in ('','/') and not parsed.query and not parsed.fragment
+        except Exception:return False
+    def client_ip(self):
+        if os.environ.get('RENDER_SERVICE_ID'):
+            cloudflare_ip=self.headers.get('CF-Connecting-IP','').strip()
+            try:return str(ipaddress.ip_address(cloudflare_ip))
+            except ValueError:pass
+            forwarded=self.headers.get('X-Forwarded-For','')
+            for candidate in reversed(forwarded.split(',')):
+                try:return str(ipaddress.ip_address(candidate.strip()))
+                except ValueError:continue
+        try:return str(ipaddress.ip_address(self.client_address[0]))
+        except (ValueError,IndexError):return 'unknown'
+    def enforce_rate_limit(self,scope,maximum,window_seconds):
+        with connect() as c:
+            allowed=request_limit_allows(c,scope,self.client_ip(),maximum,window_seconds)
+        if not allowed:self.json_response(429,{'error':'Prea multe cereri. Așteaptă puțin și încearcă din nou.'})
+        return allowed
     def auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_session'].value if 'tunspro_session' in jar else ''
         if not token: return None
@@ -306,7 +415,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c: c.execute('INSERT INTO sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user_id,expiry.isoformat()))
         secure='; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else ''
         return {'Set-Cookie':f'tunspro_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000{secure}'}
-    def clear_session(self): return {'Set-Cookie':'tunspro_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'}
+    def clear_session(self): return {'Set-Cookie':'tunspro_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'+('; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else '')}
     def client_auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_client'].value if 'tunspro_client' in jar else ''
         if not token:return None
@@ -316,7 +425,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c:c.execute('INSERT INTO client_sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),customer_id,expiry.isoformat()))
         secure='; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else ''
         return {'Set-Cookie':f'tunspro_client={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000{secure}'}
-    def clear_client_session(self):return {'Set-Cookie':'tunspro_client=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'}
+    def clear_client_session(self):return {'Set-Cookie':'tunspro_client=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'+('; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else '')}
     def admin_auth(self,c):
         jar=cookies.SimpleCookie(self.headers.get('Cookie','')); token=jar['tunspro_admin'].value if 'tunspro_admin' in jar else ''
         if not token:return None
@@ -326,7 +435,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c:c.execute('INSERT INTO admin_sessions VALUES(?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),admin_id,expiry.isoformat()))
         secure='; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else ''
         return {'Set-Cookie':f'tunspro_admin={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800{secure}'}
-    def clear_admin_session(self):return {'Set-Cookie':'tunspro_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'}
+    def clear_admin_session(self):return {'Set-Cookie':'tunspro_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+('; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else '')}
     def get(self):
         u=urllib.parse.urlparse(self.path); path=urllib.parse.unquote(u.path); q=urllib.parse.parse_qs(u.query)
         if path=='/api/admin/backup':
@@ -522,13 +631,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
     def do_GET(self):
-        try:self.get()
+        try:
+            path=urllib.parse.urlparse(self.path).path
+            if path.startswith('/api/') and not self.enforce_rate_limit('get:'+path,240,60):return
+            self.get()
         except Exception as e: print('GET error:',repr(e)); self.json_response(500,{'error':'A apărut o eroare. Încearcă din nou.'})
     def do_POST(self):
         path=urllib.parse.urlparse(self.path).path
         try:
-            origin=self.headers.get('Origin')
-            if origin and urllib.parse.urlparse(origin).netloc!=self.headers.get('Host'):return self.json_response(403,{'error':'Origine invalidă.'})
+            if path.startswith('/api/'):
+                if path=='/api/webhooks/stripe':limit,window=600,60
+                elif path in ('/api/auth/login','/api/admin/login','/api/client/auth/login','/api/auth/register','/api/client/auth/register','/api/auth/password-reset/request','/api/auth/password-reset/confirm'):limit,window=30,900
+                else:limit,window=120,60
+                if not self.enforce_rate_limit('post:'+path,limit,window):return
+            if path!='/api/webhooks/stripe' and not self.mutation_origin_valid():return self.json_response(403,{'error':'Originea cererii nu este permisă.'})
             if path=='/api/auth/register':return self.register(self.body_json())
             if path=='/api/auth/login':return self.login(self.body_json())
             if path=='/api/auth/password-reset/request':return self.request_password_reset(self.body_json())
@@ -539,7 +655,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/admin/logout':
                 with connect() as c:
                     admin=self.admin_auth(c)
-                    if admin:c.execute('DELETE FROM admin_sessions WHERE admin_id=?',(admin['id'],))
+                    if admin:
+                        c.execute('DELETE FROM admin_sessions WHERE admin_id=?',(admin['id'],))
+                        c.execute('INSERT INTO admin_audit(admin_email,action,details,created) VALUES(?,?,?,?)',(admin['email'],'admin_logout','{}',iso_now()))
                 return self.json_response(200,{'ok':True},self.clear_admin_session())
             if path=='/api/client/auth/logout':
                 with connect() as c:
@@ -579,8 +697,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_PUT(self):
         path=urllib.parse.urlparse(self.path).path
         try:
-            origin=self.headers.get('Origin')
-            if origin and urllib.parse.urlparse(origin).netloc!=self.headers.get('Host'):return self.json_response(403,{'error':'Origine invalidă.'})
+            if path.startswith('/api/') and not self.enforce_rate_limit('put:'+path,120,60):return
+            if not self.mutation_origin_valid():return self.json_response(403,{'error':'Originea cererii nu este permisă.'})
             data=self.body_json()
             with connect() as c:
                 user=self.auth(c)
@@ -776,6 +894,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             admin=c.execute('SELECT * FROM admins WHERE email=?',(email,)).fetchone()
             if not admin or not password_ok(str(d.get('password','')),admin['password']):login_failure(c,key);return self.json_response(401,{'error':'E-mailul sau parola de administrator nu sunt corecte.'})
             login_success(c,key);c.execute('UPDATE admins SET last_login=? WHERE id=?',(iso_now(),admin['id']))
+            c.execute('INSERT INTO admin_audit(admin_email,action,details,created) VALUES(?,?,?,?)',(admin['email'],'admin_login','{}',iso_now()))
         return self.json_response(200,{'ok':True},self.set_admin_session(admin['id']))
     def client_favorite(self,d):
         with connect() as c:
@@ -1139,7 +1258,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             req=urllib.request.Request('https://api.stripe.com/v1/checkout/sessions',data=urllib.parse.urlencode(params).encode());req.add_header('Authorization','Bearer '+key)
             response=json.loads(urllib.request.urlopen(req,timeout=20).read());return self.json_response(200,{'url':response['url']})
     def stripe_webhook(self):
-        raw=self.rfile.read(int(self.headers.get('Content-Length','0')));sig=self.headers.get('Stripe-Signature','')
+        raw=self.read_request_body();sig=self.headers.get('Stripe-Signature','')
         secrets_by_mode={'live':os.environ.get('STRIPE_WEBHOOK_SECRET_LIVE',''),'test':os.environ.get('STRIPE_WEBHOOK_SECRET_TEST','') or os.environ.get('STRIPE_WEBHOOK_SECRET_SANDBOX','')}
         legacy=os.environ.get('STRIPE_WEBHOOK_SECRET','')
         if not any(secrets_by_mode.values()) and not legacy:return self.json_response(503,{'error':'Webhook Stripe neconfigurat.'})
@@ -1232,7 +1351,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return self.json_response(200,{'received':True})
 
 if __name__=='__main__':
+    try:
+        if create_database_backup('pre-startup'):
+            print('Pre-startup database backup completed and verified.',flush=True)
+    except Exception as e:
+        raise RuntimeError('Pre-startup database backup failed; refusing to start.') from e
     init_db()
+    threading.Thread(target=database_backup_loop,daemon=True).start()
     threading.Thread(target=anonymization_loop,daemon=True).start()
     threading.Thread(target=reminder_loop,daemon=True).start()
     print(f'TunsPro running at http://localhost:{PORT}')
