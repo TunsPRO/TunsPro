@@ -95,6 +95,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS subscription_history(id INTEGER PRIMARY KEY, stripe_event_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_subscription_id TEXT, event_type TEXT NOT NULL, status TEXT, plan TEXT, period_start TEXT, period_end TEXT, event_created INTEGER NOT NULL, created TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancel_at TEXT);
         CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, admin_email TEXT NOT NULL, action TEXT NOT NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, details TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS booking_audit(id INTEGER PRIMARY KEY, booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, action TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id INTEGER, old_starts TEXT, new_starts TEXT, old_status TEXT, new_status TEXT, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS client_notes(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, client_key TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', updated TEXT NOT NULL, UNIQUE(shop_id,client_key));
         CREATE TABLE IF NOT EXISTS login_limits(email_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL, blocked_until TEXT);
         CREATE TABLE IF NOT EXISTS request_limits(bucket_hash TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires TEXT NOT NULL);
@@ -167,6 +168,11 @@ def anonymize_old_bookings():
     cutoff=(now_utc()-timedelta(days=365)).isoformat()
     with connect() as c:
         c.execute("UPDATE reviews SET customer_id=NULL WHERE booking_id IN (SELECT id FROM bookings WHERE julianday(ends)<julianday(?))",(cutoff,))
+        old_clients=c.execute("SELECT DISTINCT shop_id,phone FROM bookings WHERE julianday(ends)<julianday(?) AND phone<>'' AND client!='Date anonimizate'",(cutoff,)).fetchall()
+        for client in old_clients:
+            key=hashlib.sha256(normalize_ro_mobile(client['phone']).encode()).hexdigest()
+            retained=c.execute("SELECT 1 FROM bookings WHERE shop_id=? AND phone=? AND julianday(ends)>=julianday(?) AND client!='Date anonimizate' LIMIT 1",(client['shop_id'],client['phone'],cutoff)).fetchone()
+            if not retained:c.execute('DELETE FROM client_notes WHERE shop_id=? AND client_key=?',(client['shop_id'],key))
         c.execute("UPDATE bookings SET client='Date anonimizate',phone='',email='',customer_id=NULL WHERE julianday(ends)<julianday(?) AND (client<>'Date anonimizate' OR phone<>'' OR email<>'' OR customer_id IS NOT NULL)",(cutoff,))
 
 def anonymization_loop():
@@ -614,7 +620,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
                 shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone()
                 if path=='/api/manage/dashboard':
-                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('pending','confirmed','completed') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
+                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('pending','confirmed','completed','cancelled') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
                     if sub and sub['plan'] in PLAN_PRICES and sub['status'] in ('active','trialing') and not sub['paid_until'] and sub['stripe_subscription_id']:
                         try:
                             details=stripe_subscription_details(sub['stripe_subscription_id'])
@@ -628,7 +634,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     try:shop_data['photos']=json.loads(shop_data.get('photos') or '[]')
                     except (TypeError,ValueError):shop_data['photos']=[]
                     if not isinstance(shop_data['photos'],list):shop_data['photos']=[]
-                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {}})
+                    notes={x['client_key']:x['note'] for x in c.execute('SELECT client_key,note FROM client_notes WHERE shop_id=?',(shop['id'],)).fetchall()} if paid else {}
+                    booking_data=[]
+                    if paid:
+                        for item in bookings:
+                            booking=dict(item);phone_key=hashlib.sha256(normalize_ro_mobile(booking.get('phone','')).encode()).hexdigest() if booking.get('phone') else ''
+                            booking['client_note']=notes.get(phone_key,'');booking_data.append(booking)
+                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
@@ -692,6 +704,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/manage/bookings/confirm':return self.confirm_booking(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
             if path=='/api/manage/bookings/complete':return self.complete_booking(self.body_json())
+            if path=='/api/manage/client-note':return self.save_client_note(self.body_json())
             if path=='/api/billing/checkout':return self.checkout()
             if path=='/api/webhooks/stripe':return self.stripe_webhook()
             return self.json_response(404,{'error':'Nu am găsit ruta.'})
@@ -1255,6 +1268,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:sms_notice(row['phone'],f'TunsPro: programarea ta la {row["shop_name"]} a fost confirmată pentru {when}, cu {row["staff_name"]}.')
             except Exception as e:print('Client booking confirmation SMS failed:',repr(e))
         return self.json_response(200,{'ok':True,'message':'Programarea a fost confirmată.'})
+    def save_client_note(self,d):
+        phone=d.get('phone')
+        if not isinstance(phone,str) or not (normalized:=normalize_ro_mobile(phone)):
+            return self.json_response(400,{'error':'Numărul clientului nu este valid.'})
+        note=d.get('note','')
+        if not isinstance(note,str):return self.json_response(400,{'error':'Nota nu este validă.'})
+        note=note.strip()
+        if len(note)>500:return self.json_response(400,{'error':'Nota poate avea maximum 500 de caractere.'})
+        client_key=hashlib.sha256(normalized.encode()).hexdigest()
+        with connect() as c:
+            user=self.auth(c)
+            if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
+            sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
+            if not active_subscription(sub):return self.json_response(403,{'error':'Fișa clienților este disponibilă cu un abonament activ.'})
+            exists=c.execute("SELECT 1 FROM bookings WHERE shop_id=? AND phone=? AND client!='Date anonimizate' LIMIT 1",(user['shop_id'],normalized)).fetchone()
+            if not exists:return self.json_response(404,{'error':'Clientul nu a fost găsit în această frizerie.'})
+            if note:
+                c.execute('INSERT INTO client_notes(shop_id,client_key,note,updated) VALUES(?,?,?,?) ON CONFLICT(shop_id,client_key) DO UPDATE SET note=excluded.note,updated=excluded.updated',(user['shop_id'],client_key,note,iso_now()))
+            else:c.execute('DELETE FROM client_notes WHERE shop_id=? AND client_key=?',(user['shop_id'],client_key))
+        return self.json_response(200,{'ok':True,'message':'Nota clientului a fost salvată.'})
     def checkout(self):
         with connect() as c:
             user=self.auth(c)
