@@ -57,6 +57,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS client_sessions(token_hash TEXT PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS favorites(customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, created TEXT NOT NULL, PRIMARY KEY(customer_id,shop_id));
         CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, booking_id INTEGER UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5), comment TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS promo_codes(id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, discount_percent INTEGER NOT NULL CHECK(discount_percent BETWEEN 1 AND 100), active INTEGER NOT NULL DEFAULT 1, starts_at TEXT, ends_at TEXT, max_uses INTEGER, uses_count INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS platform_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
@@ -84,6 +86,9 @@ def init_db():
                 c.execute(f'ALTER TABLE {table} ADD COLUMN last_login TEXT')
         if 'last_login' not in {row['name'] for row in c.execute('PRAGMA table_info(admins)')}:
             c.execute('ALTER TABLE admins ADD COLUMN last_login TEXT')
+        for table,column,definition in [('reviews','is_visible','INTEGER NOT NULL DEFAULT 1'),('bookings','promo_code','TEXT'),('bookings','discount_amount','INTEGER NOT NULL DEFAULT 0')]:
+            if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         c.execute("UPDATE subscriptions SET plan='pro' WHERE plan='free' AND status IN ('active','trialing') AND paid_until IS NOT NULL")
         # Existing databases need the bookings columns added before this index
         # is created; CREATE TABLE IF NOT EXISTS does not migrate old tables.
@@ -208,8 +213,8 @@ def shop_public(c, shop):
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     team = c.execute('SELECT id,name,role,photo,weekly_schedule FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
-    reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
-    rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=?',(shop['id'],)).fetchone()
+    reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? AND is_visible=1 ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
+    rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=? AND is_visible=1',(shop['id'],)).fetchone()
     return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':json.loads(x['weekly_schedule'] or '{}')} for x in team]}
 
 def normalize_ro_mobile(value):
@@ -374,7 +379,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 owners=c.execute('SELECT u.id,u.email,u.owner,u.created,u.last_login,u.status,sh.name shop_name,sh.city,sub.plan,sub.status subscription_status,sub.paid_until FROM users u JOIN shops sh ON sh.user_id=u.id LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY u.created DESC').fetchall()
                 customers=c.execute('SELECT c.id,c.name,c.email,c.phone,c.created,c.last_login,c.status,COUNT(b.id) booking_count FROM customers c LEFT JOIN bookings b ON b.customer_id=c.id GROUP BY c.id ORDER BY c.created DESC').fetchall()
                 admins=c.execute('SELECT id,email,created,last_login FROM admins ORDER BY created').fetchall()
-                bookings=c.execute('SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.created,b.status,b.price_at_booking,sh.name shop_name,sh.city,s.name service_name,s.duration,t.name staff_name,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC LIMIT 500').fetchall()
+                bookings=c.execute('SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.created,b.status,b.price_at_booking,b.promo_code,b.discount_amount,sh.name shop_name,sh.city,s.name service_name,s.duration,t.name staff_name,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC LIMIT 500').fetchall()
+                staff_rows=c.execute('SELECT t.id,t.shop_id,t.name,t.role,t.photo,t.active,sh.name shop_name,sh.city,(SELECT COUNT(*) FROM bookings b WHERE b.staff_id=t.id) booking_count FROM staff t JOIN shops sh ON sh.id=t.shop_id ORDER BY sh.name,t.name').fetchall()
+                service_rows=c.execute('SELECT s.id,s.shop_id,s.name,s.description,s.duration,s.price,s.active,sh.name shop_name,sh.city,(SELECT COUNT(*) FROM bookings b WHERE b.service_id=s.id) booking_count FROM services s JOIN shops sh ON sh.id=s.shop_id ORDER BY sh.name,s.name').fetchall()
+                review_rows=c.execute('SELECT r.id,r.booking_id,r.shop_id,r.rating,r.comment,r.created,r.is_visible,b.client,s.name service_name,sh.name shop_name FROM reviews r JOIN bookings b ON b.id=r.booking_id JOIN services s ON s.id=b.service_id JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
+                promo_codes=c.execute('SELECT * FROM promo_codes ORDER BY created DESC').fetchall()
                 subscriptions=c.execute('SELECT sh.id shop_id,sh.name shop_name,sh.city,sub.status,sub.plan,sub.current_period_start,sub.paid_until,sub.stripe_subscription_id FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sub.paid_until DESC').fetchall()
                 payments=c.execute('SELECT p.*,sh.name shop_name FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id ORDER BY COALESCE(p.paid_at,p.created) DESC LIMIT 500').fetchall()
                 refunds=c.execute('SELECT r.*,sh.name shop_name FROM refunds r LEFT JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
@@ -385,6 +394,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     day=local_today-timedelta(days=offset);start=datetime.combine(day,time.min,TZ).isoformat();end=datetime.combine(day+timedelta(days=1),time.min,TZ).isoformat();point={'date':day.isoformat(),'count':count("SELECT COUNT(*) FROM bookings WHERE starts>=? AND starts<? AND status IN ('confirmed','completed')",(start,end))}
                     daily_30.append(point)
                     if offset<7:daily_7.append(point)
+                monthly=[]
+                for offset in range(5,-1,-1):
+                    month_index=local_today.year*12+local_today.month-1-offset;year,month=divmod(month_index,12);month+=1;start=datetime(year,month,1,tzinfo=TZ);end=datetime(year+((month)%12==0),month%12+1,1,tzinfo=TZ);start_utc=start.astimezone(timezone.utc).isoformat();end_utc=end.astimezone(timezone.utc).isoformat()
+                    monthly.append({'month':f'{year:04d}-{month:02d}','bookings':count("SELECT COUNT(*) FROM bookings WHERE starts>=? AND starts<? AND status IN ('confirmed','completed')",(start_utc,end_utc)),'new_customers':count('SELECT COUNT(*) FROM customers WHERE created>=? AND created<?',(start_utc,end_utc)),'revenue':count("SELECT COALESCE(SUM(MAX(0,amount-refunded_amount)),0) FROM payments WHERE status='paid' AND currency='ron' AND paid_at>=? AND paid_at<?",(start_utc,end_utc))})
+                service_mix=[dict(x) for x in c.execute("SELECT s.name service_name,COUNT(b.id) count FROM services s LEFT JOIN bookings b ON b.service_id=s.id AND b.status IN ('confirmed','completed') GROUP BY s.id ORDER BY count DESC,s.name LIMIT 6").fetchall()]
+                review_summary=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE is_visible=1').fetchone()
+                hidden_reviews=count('SELECT COUNT(*) FROM reviews WHERE is_visible=0')
+                active_services=count('SELECT COUNT(*) FROM services WHERE active=1'); active_staff=count('SELECT COUNT(*) FROM staff WHERE active=1')
+                capacity_minutes=booked_minutes=0
+                for person in c.execute('SELECT id,weekly_schedule FROM staff WHERE active=1').fetchall():
+                    try:schedule=json.loads(person['weekly_schedule'] or '{}')
+                    except (TypeError,ValueError):schedule={}
+                    for offset in range(30):
+                        work_day=local_today-timedelta(days=offset);hours=schedule.get(str(work_day.weekday()))
+                        if not hours or len(hours)!=2:continue
+                        try:capacity_minutes+=max(0,int((time.fromisoformat(hours[1]).hour*60+time.fromisoformat(hours[1]).minute)-(time.fromisoformat(hours[0]).hour*60+time.fromisoformat(hours[0]).minute)))
+                        except (TypeError,ValueError):continue
+                    booked_minutes+=count("SELECT COALESCE(SUM((julianday(ends)-julianday(starts))*1440),0) FROM bookings WHERE staff_id=? AND status IN ('confirmed','completed') AND starts>=? AND starts<?",(person['id'],(local_today-timedelta(days=29)).isoformat(),(local_today+timedelta(days=1)).isoformat()))
+                occupancy_rate=round(min(100,booked_minutes/capacity_minutes*100),1) if capacity_minutes else None
                 top_services=[dict(x) for x in c.execute("SELECT s.name service_name,COUNT(*) count FROM bookings b JOIN services s ON s.id=b.service_id WHERE b.created>=? AND b.status<>'cancelled' GROUP BY s.id ORDER BY count DESC LIMIT 5",(days_30_start,)).fetchall()]
                 top_shops=[dict(x) for x in c.execute("SELECT sh.name shop_name,COUNT(*) count FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.created>=? AND b.status<>'cancelled' GROUP BY sh.id ORDER BY count DESC LIMIT 5",(days_30_start,)).fetchall()]
                 activity=[]
@@ -394,7 +422,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 activity.extend({'id':'failed-'+str(x['id']),'action':'payment_failed','shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'source':'system'} for x in c.execute("SELECT p.id,p.shop_id,sh.name shop_name,p.created FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id WHERE p.status='failed' ORDER BY p.created DESC LIMIT 10").fetchall())
                 activity.extend({'id':'booking-'+str(x['id']),'action':x['action'],'shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'actor_type':x['actor_type'],'source':'booking'} for x in c.execute("SELECT a.id,a.action,a.shop_id,sh.name shop_name,a.created,a.actor_type FROM booking_audit a LEFT JOIN shops sh ON sh.id=a.shop_id WHERE a.action='booking_cancelled' ORDER BY a.created DESC LIMIT 10").fetchall())
                 activity=sorted(activity,key=lambda x:x.get('created') or '',reverse=True)[:30]
-                return self.json_response(200,{'counts':counts,'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'admins':[dict(x) for x in admins],'bookings':[dict(x) for x in bookings],'subscriptions':[dict(x) for x in subscriptions],'subscription_history':[dict(x) for x in subscription_history],'payments':[dict(x) for x in payments],'refunds':[dict(x) for x in refunds],'booking_history':[dict(x) for x in booking_history],'activity':activity,'booking_activity':daily_7,'booking_activity_30':daily_30,'top_services':top_services,'top_shops':top_shops})
+                return self.json_response(200,{'counts':{**counts,'active_services':active_services,'active_staff':active_staff,'visible_reviews':review_summary['count'],'average_rating':round(review_summary['average'],2) if review_summary['average'] else None,'hidden_reviews':hidden_reviews,'occupancy_rate_30':occupancy_rate},'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'admins':[dict(x) for x in admins],'staff':[dict(x) for x in staff_rows],'services':[dict(x) for x in service_rows],'reviews':[dict(x) for x in review_rows],'promo_codes':[dict(x) for x in promo_codes],'bookings':[dict(x) for x in bookings],'subscriptions':[dict(x) for x in subscriptions],'subscription_history':[dict(x) for x in subscription_history],'payments':[dict(x) for x in payments],'refunds':[dict(x) for x in refunds],'booking_history':[dict(x) for x in booking_history],'activity':activity,'booking_activity':daily_7,'booking_activity_30':daily_30,'monthly':monthly,'service_mix':service_mix,'top_services':top_services,'top_shops':top_shops,'integrations':{'stripe':bool(os.environ.get('STRIPE_SECRET_KEY')),'email':email_configured(),'sms':bool(os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'))}})
         if path=='/api/public/shops':
             term=search_norm(q.get('q',[''])[0]).strip()
             with connect() as c:
@@ -495,6 +523,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/admin/account':return self.admin_account(self.body_json())
             if path=='/api/admin/shop':return self.admin_shop_update(self.body_json())
             if path=='/api/admin/approval':return self.admin_shop_approval(self.body_json())
+            if path=='/api/admin/staff':return self.admin_staff_toggle(self.body_json())
+            if path=='/api/admin/service':return self.admin_service_toggle(self.body_json())
+            if path=='/api/admin/review':return self.admin_review_visibility(self.body_json())
+            if path=='/api/admin/promo-codes':return self.admin_promo_codes(self.body_json())
             if path=='/api/manage/photos':return self.upload_photo(self.body_json())
             if path=='/api/manage/staff-photo':return self.upload_staff_photo(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
@@ -808,6 +840,76 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c.execute('UPDATE shops SET approval_status=?,listing_enabled=CASE WHEN ?=\'rejected\' THEN 0 ELSE listing_enabled END WHERE id=?',(status,status,shop_id))
             c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'shop_'+status,shop_id,json.dumps({'from':shop['approval_status'],'to':status}),iso_now()))
         return self.json_response(200,{'ok':True,'status':status})
+    def admin_staff_toggle(self,d):
+        try:staff_id=int(d.get('staff_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Frizerul ales nu este valid.'})
+        active=bool(d.get('active'))
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            person=c.execute('SELECT id,shop_id,active FROM staff WHERE id=?',(staff_id,)).fetchone()
+            if not person:return self.json_response(404,{'error':'Frizerul nu a fost găsit.'})
+            if bool(person['active'])==active:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE staff SET active=? WHERE id=?',(int(active),staff_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'staff_activated' if active else 'staff_deactivated',person['shop_id'],json.dumps({'staff_id':staff_id}),iso_now()))
+        return self.json_response(200,{'ok':True,'active':active})
+    def admin_service_toggle(self,d):
+        try:service_id=int(d.get('service_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Serviciul ales nu este valid.'})
+        active=bool(d.get('active'))
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            service=c.execute('SELECT id,shop_id,active FROM services WHERE id=?',(service_id,)).fetchone()
+            if not service:return self.json_response(404,{'error':'Serviciul nu a fost găsit.'})
+            if bool(service['active'])==active:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE services SET active=? WHERE id=?',(int(active),service_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'service_activated' if active else 'service_deactivated',service['shop_id'],json.dumps({'service_id':service_id}),iso_now()))
+        return self.json_response(200,{'ok':True,'active':active})
+    def admin_review_visibility(self,d):
+        try:review_id=int(d.get('review_id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Recenzia aleasă nu este validă.'})
+        visible=bool(d.get('visible'))
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            review=c.execute('SELECT id,shop_id,is_visible FROM reviews WHERE id=?',(review_id,)).fetchone()
+            if not review:return self.json_response(404,{'error':'Recenzia nu a fost găsită.'})
+            if bool(review['is_visible'])==visible:return self.json_response(200,{'ok':True,'changed':False})
+            c.execute('UPDATE reviews SET is_visible=? WHERE id=?',(int(visible),review_id))
+            c.execute('INSERT INTO admin_audit(admin_email,action,shop_id,details,created) VALUES(?,?,?,?,?)',(admin['email'],'review_shown' if visible else 'review_hidden',review['shop_id'],json.dumps({'review_id':review_id}),iso_now()))
+        return self.json_response(200,{'ok':True,'visible':visible})
+    def admin_promo_codes(self,d):
+        action=str(d.get('action','create'))
+        try:code_id=int(d.get('id',0))
+        except (TypeError,ValueError):code_id=0
+        with connect() as c:
+            admin=self.admin_auth(c)
+            if not admin:return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
+            if action=='create':
+                code=str(d.get('code','')).strip().upper();percent=d.get('discount_percent');starts=str(d.get('starts_at','')).strip() or None;ends=str(d.get('ends_at','')).strip() or None;maximum=d.get('max_uses')
+                try:percent=int(percent);maximum=int(maximum) if maximum not in (None,'') else None
+                except (TypeError,ValueError):return self.json_response(400,{'error':'Procentul sau limita de utilizări nu sunt valide.'})
+                if not re.fullmatch(r'[A-Z0-9_-]{3,32}',code) or not 1<=percent<=100 or (maximum is not None and not 1<=maximum<=100000):return self.json_response(400,{'error':'Codul trebuie să aibă 3–32 caractere, reducerea 1–100%, iar limita să fie pozitivă.'})
+                try:
+                    if starts:datetime.fromisoformat(starts)
+                    if ends:datetime.fromisoformat(ends)
+                    if starts and ends and datetime.fromisoformat(ends)<=datetime.fromisoformat(starts):raise ValueError()
+                except ValueError:return self.json_response(400,{'error':'Intervalul de valabilitate nu este valid.'})
+                try:
+                    cur=c.execute('INSERT INTO promo_codes(code,discount_percent,active,starts_at,ends_at,max_uses,created_by,created) VALUES(?,?,1,?,?,?,?,?)',(code,percent,starts,ends,maximum,admin['email'],iso_now()))
+                except sqlite3.IntegrityError:return self.json_response(409,{'error':'Codul promoțional există deja.'})
+                c.execute('INSERT INTO admin_audit(admin_email,action,details,created) VALUES(?,?,?,?)',(admin['email'],'promo_code_created',json.dumps({'code':code,'discount_percent':percent}),iso_now()))
+                return self.json_response(201,{'ok':True,'id':cur.lastrowid})
+            promo=c.execute('SELECT * FROM promo_codes WHERE id=?',(code_id,)).fetchone()
+            if not promo:return self.json_response(404,{'error':'Codul promoțional nu a fost găsit.'})
+            if action=='toggle':
+                active=bool(d.get('active'));c.execute('UPDATE promo_codes SET active=? WHERE id=?',(int(active),code_id));event='promo_code_activated' if active else 'promo_code_deactivated'
+            elif action=='delete':
+                c.execute('DELETE FROM promo_codes WHERE id=?',(code_id,));active=False;event='promo_code_deleted'
+            else:return self.json_response(400,{'error':'Acțiunea nu este validă.'})
+            c.execute('INSERT INTO admin_audit(admin_email,action,details,created) VALUES(?,?,?,?)',(admin['email'],event,json.dumps({'code':promo['code']}),iso_now()))
+        return self.json_response(200,{'ok':True,'active':active})
     def create_booking(self,d):
         client_name=str(d.get('client','')).strip();client_email=str(d.get('email','')).strip().lower()
         client_phone=normalize_ro_mobile(str(d.get('phone','')))
@@ -827,12 +929,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):raise ValueError('Ora aleasă este în afara programului frizerului.')
             collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status='confirmed' AND starts<? AND ends>?",(staff['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:raise ValueError('Ora tocmai a fost rezervată. Alege alt interval.')
+            promo_code=str(d.get('promo_code','')).strip().upper();discount_amount=0
+            if promo_code:
+                promo=c.execute('SELECT * FROM promo_codes WHERE code=? COLLATE NOCASE AND active=1',(promo_code,)).fetchone()
+                if not promo:raise ValueError('Codul promoțional nu este valid sau nu mai este activ.')
+                if promo['starts_at'] and day.isoformat()<promo['starts_at'][:10]:raise ValueError('Codul promoțional nu este încă valabil.')
+                if promo['ends_at'] and day.isoformat()>promo['ends_at'][:10]:raise ValueError('Codul promoțional a expirat.')
+                if promo['max_uses'] is not None and promo['uses_count']>=promo['max_uses']:raise ValueError('Codul promoțional și-a atins limita de utilizări.')
+                discount_amount=round(service['price']*promo['discount_percent']/100)
             current=now_utc();reminder_at=starts-timedelta(hours=24);reminder_sent=0
             if reminder_at<=current:
                 if starts>current+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
                 else:reminder_sent=1
             cancel_token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(cancel_token.encode()).hexdigest()
-            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price'],token_hash)); booking_id=cur.lastrowid
+            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash,promo_code,discount_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price']-discount_amount,token_hash,promo_code or None,discount_amount)); booking_id=cur.lastrowid
+            if promo_code:c.execute('UPDATE promo_codes SET uses_count=uses_count+1 WHERE id=?',(promo['id'],))
             record_booking_event(c,booking_id,shop['id'],'booking_created','client')
             opts=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone(); owner=c.execute('SELECT u.email FROM users u WHERE u.id=?',(shop['user_id'],)).fetchone()
         days_ro=['luni','marți','miercuri','joi','vineri','sâmbătă','duminică']
@@ -857,7 +968,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if opts and opts['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
             except Exception as e:print('Barber SMS notification failed:',repr(e))
-        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'notifications':{'email':mail_status,'sms':sms_status},'message':'Programarea a fost înregistrată.'})
+        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'price':service['price']-discount_amount,'discount':discount_amount,'promo_code':promo_code or None,'notifications':{'email':mail_status,'sms':sms_status},'message':'Programarea a fost înregistrată.'})
     def public_reschedule_details(self,d):
         token=str(d.get('token','')).strip()
         if len(token)<30:return self.json_response(400,{'error':'Linkul de modificare nu este valid.'})
