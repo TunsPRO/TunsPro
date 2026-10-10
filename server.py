@@ -752,7 +752,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         team_data.append(item)
                     return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':team_data,'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {},'notification_delivery':{'email_configured':email_configured(),'sms_configured':sms_configured()}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
-        if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
+        if path not in ('/','/index.html','/client.js','/features.js','/homepage.js','/styles.css','/assets/home-barber-editorial.png'):return self.send_error(404)
         return super().do_GET()
     def do_GET(self):
         try:
