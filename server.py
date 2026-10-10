@@ -146,6 +146,8 @@ def init_db():
         for table,column,definition in [('reviews','is_visible','INTEGER NOT NULL DEFAULT 1'),('bookings','promo_code','TEXT'),('bookings','discount_amount','INTEGER NOT NULL DEFAULT 0')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+        if 'reason' not in {row['name'] for row in c.execute('PRAGMA table_info(booking_audit)')}:
+            c.execute("ALTER TABLE booking_audit ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
         c.execute("UPDATE subscriptions SET plan='pro' WHERE plan='free' AND status IN ('active','trialing') AND paid_until IS NOT NULL")
         # Existing databases need the bookings columns added before this index
         # is created; CREATE TABLE IF NOT EXISTS does not migrate old tables.
@@ -219,8 +221,8 @@ def request_limit_allows(c,scope,identity,maximum,window_seconds):
     if row['requests']>=maximum:return False
     c.execute('UPDATE request_limits SET requests=requests+1 WHERE bucket_hash=?',(key,))
     return True
-def record_booking_event(c,booking_id,shop_id,action,actor_type,actor_id=None,old_starts=None,new_starts=None,old_status=None,new_status=None):
-    c.execute('INSERT INTO booking_audit(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,iso_now()))
+def record_booking_event(c,booking_id,shop_id,action,actor_type,actor_id=None,old_starts=None,new_starts=None,old_status=None,new_status=None,reason=''):
+    c.execute('INSERT INTO booking_audit(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,created,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,iso_now(),reason))
 def record_subscription_event(c,event_id,event_type,event_created,shop_id,stripe_sub,status,plan,period_start,period_end,cancel_at_period_end=False,cancel_at=None):
     c.execute('INSERT OR IGNORE INTO subscription_history(stripe_event_id,shop_id,stripe_subscription_id,event_type,status,plan,period_start,period_end,event_created,created,cancel_at_period_end,cancel_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(event_id,shop_id,stripe_sub,event_type,status,plan,period_start,period_end,event_created,iso_now(),int(bool(cancel_at_period_end)),cancel_at))
 def password_hash(password, salt=None):
@@ -481,7 +483,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with connect() as c:
                 customer=self.client_auth(c)
                 if not customer:return self.json_response(401,{'error':'Conectează-te la contul de client.'})
-                bookings=c.execute("SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.status,b.service_id,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name,sh.name shop_name,sh.slug shop_slug,sh.city,sh.address,sh.phone shop_phone FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.customer_id=? AND b.status IN ('confirmed','completed','cancelled') ORDER BY b.starts DESC",(customer['id'],)).fetchall()
+                bookings=c.execute("SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.status,b.service_id,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name,sh.name shop_name,sh.slug shop_slug,sh.city,sh.address,sh.phone shop_phone FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.customer_id=? AND b.status IN ('pending','confirmed','completed','cancelled') ORDER BY b.starts DESC",(customer['id'],)).fetchall()
                 favorite_rows=c.execute('SELECT sh.* FROM favorites f JOIN shops sh ON sh.id=f.shop_id WHERE f.customer_id=? ORDER BY f.created DESC',(customer['id'],)).fetchall()
                 favorites=[shop_public(c,shop) for shop in favorite_rows];favorites=[x for x in favorites if x]
                 reviews=[dict(x) for x in c.execute('SELECT booking_id,rating,comment FROM reviews WHERE customer_id=?',(customer['id'],)).fetchall()]
@@ -612,7 +614,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
                 shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone()
                 if path=='/api/manage/dashboard':
-                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('confirmed','completed') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
+                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('pending','confirmed','completed') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
                     if sub and sub['plan'] in PLAN_PRICES and sub['status'] in ('active','trialing') and not sub['paid_until'] and sub['stripe_subscription_id']:
                         try:
                             details=stripe_subscription_details(sub['stripe_subscription_id'])
@@ -687,6 +689,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/admin/promo-codes':return self.admin_promo_codes(self.body_json())
             if path=='/api/manage/photos':return self.upload_photo(self.body_json())
             if path=='/api/manage/staff-photo':return self.upload_staff_photo(self.body_json())
+            if path=='/api/manage/bookings/confirm':return self.confirm_booking(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
             if path=='/api/manage/bookings/complete':return self.complete_booking(self.body_json())
             if path=='/api/billing/checkout':return self.checkout()
@@ -909,11 +912,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with connect() as c:
             customer=self.client_auth(c)
             if not customer:return self.json_response(401,{'error':'Conectează-te la contul de client.'})
-            row=c.execute("SELECT b.*,sh.name shop_name,sh.phone shop_phone FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.id=? AND b.customer_id=? AND b.status='confirmed'",(int(d.get('id',0)),customer['id'])).fetchone()
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.phone shop_phone FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.id=? AND b.customer_id=? AND b.status IN ('pending','confirmed')",(int(d.get('id',0)),customer['id'])).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea viitoare nu a fost găsită.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea nu mai poate fi anulată din cont. Sună frizeria.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
-            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=customer['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
+            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=customer['id'],old_starts=row['starts'],new_starts=row['starts'],old_status=row['status'],new_status='cancelled')
         try:send_email(customer['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta a fost anulată. Pentru o nouă rezervare, caută frizeria în TunsPro.')
         except Exception as e:print('Client cancellation notice failed:',repr(e))
         return self.json_response(200,{'ok':True})
@@ -1101,7 +1104,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if starts>current+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
                 else:reminder_sent=1
             cancel_token=secrets.token_urlsafe(32);token_hash=hashlib.sha256(cancel_token.encode()).hexdigest()
-            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash,promo_code,discount_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'confirmed',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price']-discount_amount,token_hash,promo_code or None,discount_amount)); booking_id=cur.lastrowid
+            cur=c.execute('INSERT INTO bookings(shop_id,service_id,staff_id,client,phone,email,starts,ends,status,created,reminder_at,reminder_sent,customer_id,price_at_booking,manage_token_hash,promo_code,discount_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(shop['id'],service['id'],staff['id'],client_name,client_phone,client_email,starts.isoformat(),finish.isoformat(),'pending',iso_now(),reminder_at.isoformat(),reminder_sent,None,service['price']-discount_amount,token_hash,promo_code or None,discount_amount)); booking_id=cur.lastrowid
             if promo_code:c.execute('UPDATE promo_codes SET uses_count=uses_count+1 WHERE id=?',(promo['id'],))
             record_booking_event(c,booking_id,shop['id'],'booking_created','client')
             opts=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone(); owner=c.execute('SELECT u.email FROM users u WHERE u.id=?',(shop['user_id'],)).fetchone()
@@ -1113,27 +1116,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         mail_status='unavailable';sms_status='unavailable'
         if email_configured():
             try:
-                send_email(client_email,f'Programare confirmată — {shop["name"]}',f'Programarea ta: {service["name"]} cu {staff["name"]}, {when}. Adresă: {shop["address"]}, {shop["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
+                send_email(client_email,f'Cerere de programare primită — {shop["name"]}',f'Am primit cererea ta pentru {service["name"]} cu {staff["name"]}, {when}. Programarea așteaptă confirmarea frizeriei. Adresă: {shop["address"]}, {shop["city"]}. Dacă nu mai dorești rezervarea, o poți anula aici: {manage_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
                 mail_status='sent'
             except Exception as e:mail_status='failed';print('Client confirmation failed:',repr(e))
         if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:
-                sms_notice(client_phone,f'TunsPro: programarea ta la {shop["name"]} este înregistrată pentru {when}. Anulare: {manage_url}. Modificare: {reschedule_url}.')
+                sms_notice(client_phone,f'TunsPro: cererea ta la {shop["name"]} pentru {when} a fost primita si asteapta confirmarea frizeriei. Anulare: {manage_url}.')
                 sms_status='sent'
             except Exception as e:sms_status='failed';print('Client SMS confirmation failed:',repr(e))
         if opts and opts['notification_email'] and owner and email_configured():
-            try:send_email(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a rezervat {service["name"]} cu {staff["name"]}, {when}. Telefon: {client_phone}')
+            try:send_email(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a trimis o cerere pentru {service["name"]} cu {staff["name"]}, {when}. Așteaptă confirmarea ta. Telefon: {client_phone}')
             except Exception as e:print('Barber email notification failed:',repr(e))
         if opts and opts['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
             try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
             except Exception as e:print('Barber SMS notification failed:',repr(e))
-        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'price':service['price']-discount_amount,'discount':discount_amount,'promo_code':promo_code or None,'notifications':{'email':mail_status,'sms':sms_status},'message':'Programarea a fost înregistrată.'})
+        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'price':service['price']-discount_amount,'discount':discount_amount,'promo_code':promo_code or None,'notifications':{'email':mail_status,'sms':sms_status},'status':'pending','message':'Cererea de programare a fost trimisă și așteaptă confirmarea frizeriei.'})
     def public_reschedule_details(self,d):
         token=str(d.get('token','')).strip()
         if len(token)<30:return self.json_response(400,{'error':'Linkul de modificare nu este valid.'})
         token_hash=hashlib.sha256(token.encode()).hexdigest()
         with connect() as c:
-            row=c.execute("SELECT b.id,b.client,b.phone,b.email,b.starts,b.service_id,b.staff_id,sh.slug shop_slug,sh.name shop_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            row=c.execute("SELECT b.id,b.client,b.phone,b.email,b.starts,b.service_id,b.staff_id,sh.slug shop_slug,sh.name shop_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id WHERE b.manage_token_hash=? AND b.status IN ('pending','confirmed')",(token_hash,)).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi modificată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi modificată online.'})
         return self.json_response(200,{'booking':dict(row)})
@@ -1148,7 +1151,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if starts<=datetime.now(TZ):return self.json_response(400,{'error':'Alege o oră viitoare.'})
         with connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            row=c.execute("SELECT b.*,sh.name shop_name,sh.slug shop_slug,sh.address,sh.city,sh.phone shop_phone,sh.listing_enabled,sh.approval_status,u.status owner_status,s.name old_service_name,t.name old_staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN users u ON u.id=sh.user_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.slug shop_slug,sh.address,sh.city,sh.phone shop_phone,sh.listing_enabled,sh.approval_status,u.status owner_status,s.name old_service_name,t.name old_staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN users u ON u.id=sh.user_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status IN ('pending','confirmed')",(token_hash,)).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi modificată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi modificată online.'})
             sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(row['shop_id'],)).fetchone()
@@ -1189,11 +1192,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         token_hash=hashlib.sha256(token.encode()).hexdigest()
         with connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            row=c.execute("SELECT b.*,sh.name shop_name,sh.phone shop_phone,s.name service_name,t.name staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status='confirmed'",(token_hash,)).fetchone()
+            row=c.execute("SELECT b.*,sh.name shop_name,sh.phone shop_phone,s.name service_name,t.name staff_name FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.manage_token_hash=? AND b.status IN ('pending','confirmed')",(token_hash,)).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu mai poate fi anulată. Verifică dacă a fost deja anulată sau contactează frizeria.'})
             if datetime.fromisoformat(row['starts'])<=now_utc():return self.json_response(400,{'error':'Programarea a început deja și nu mai poate fi anulată online.'})
             c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
-            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=row['customer_id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
+            record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=row['customer_id'],old_starts=row['starts'],new_starts=row['starts'],old_status=row['status'],new_status='cancelled')
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         if row['email'] and email_configured():
@@ -1207,33 +1210,51 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:print('Barber cancellation SMS failed:',repr(e))
         return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată.'})
     def cancel_booking(self,d):
+        reason=str(d.get('reason','')).strip()
+        if not reason:return self.json_response(400,{'error':'Adaugă motivul anulării.'})
+        if len(reason)>240:return self.json_response(400,{'error':'Motivul anulării trebuie să aibă maximum 240 de caractere.'})
         with connect() as c:
             user=self.auth(c)
             if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
             sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
             if not active_subscription(sub):return self.json_response(403,{'error':'Gestionează programările cu un abonament PRO sau BUSINESS activ.'})
-            row=c.execute("SELECT b.*,s.name service_name,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.id=? AND b.shop_id=? AND b.status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT b.*,s.name service_name,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.id=? AND b.shop_id=? AND b.status IN ('pending','confirmed')",(int(d.get('id',0)),user['shop_id'])).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu a fost găsită.'})
-            c.execute("UPDATE bookings SET status='cancelled' WHERE id=?",(row['id'],))
-            record_booking_event(c,row['id'],user['shop_id'],'booking_cancelled','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='cancelled')
-            client_email=row['email'];client_phone=row['phone'];client=row['client'];starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M'); shop_name=user['shop_name']
-        try:
-            if client_email:send_email(client_email,f'Programare anulată — {shop_name}',f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie.')
-            sms_notice(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata de frizerie.')
-        except Exception as e:print('Cancellation notice failed:',repr(e))
-        return self.json_response(200,{'ok':True})
-    def complete_booking(self,d):
+            old_status=row['status']
+            changed=c.execute("UPDATE bookings SET status='cancelled' WHERE id=? AND shop_id=? AND status IN ('pending','confirmed')",(row['id'],user['shop_id'])).rowcount
+            if not changed:return self.json_response(409,{'error':'Programarea a fost modificată. Reîncarcă agenda și încearcă din nou.'})
+            record_booking_event(c,row['id'],user['shop_id'],'booking_cancelled','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status=old_status,new_status='cancelled',reason=reason)
+            client_email=row['email'];client_phone=row['phone'];client=row['client'];starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M');shop_name=user['shop_name']
+        body=f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie. Motiv: {reason}'
+        if client_email and email_configured():
+            try:send_email(client_email,f'Programare anulată — {shop_name}',body)
+            except Exception as e:print('Client cancellation notice failed:',repr(e))
+        if client_phone and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata. Motiv: {reason}')
+            except Exception as e:print('Client cancellation SMS failed:',repr(e))
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată.'})
+    def confirm_booking(self,d):
         with connect() as c:
             user=self.auth(c)
             if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
             sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
             if not active_subscription(sub):return self.json_response(403,{'error':'Gestionează programările cu un abonament PRO sau BUSINESS activ.'})
-            row=c.execute("SELECT id,starts,ends FROM bookings WHERE id=? AND shop_id=? AND status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
-            if not row:return self.json_response(404,{'error':'Programarea nu a fost găsită.'})
-            if datetime.fromisoformat(row['ends'])>now_utc():return self.json_response(400,{'error':'Programarea poate fi încheiată după ora rezervată.'})
-            c.execute("UPDATE bookings SET status='completed' WHERE id=?",(row['id'],))
-            record_booking_event(c,row['id'],user['shop_id'],'booking_completed','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='completed')
-        return self.json_response(200,{'ok':True})
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT b.*,s.name service_name,t.name staff_name,sh.name shop_name,sh.city,sh.address,sh.phone shop_phone FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id JOIN shops sh ON sh.id=b.shop_id WHERE b.id=? AND b.shop_id=? AND b.status='pending'",(int(d.get('id',0)),user['shop_id'])).fetchone()
+            if not row:return self.json_response(404,{'error':'Programarea în așteptare nu a fost găsită.'})
+            changed=c.execute("UPDATE bookings SET status='confirmed' WHERE id=? AND shop_id=? AND status='pending'",(row['id'],user['shop_id'])).rowcount
+            if not changed:return self.json_response(409,{'error':'Programarea a fost modificată. Reîncarcă agenda și încearcă din nou.'})
+            record_booking_event(c,row['id'],user['shop_id'],'booking_confirmed','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='pending',new_status='confirmed')
+        when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
+        body=f'Programarea ta a fost confirmată de frizerie: {row["service_name"]} cu {row["staff_name"]}, {when}. Adresă: {row["address"]}, {row["city"]}. Pentru ajutor, contactează frizeria la {row["shop_phone"]}.'
+        if row['email'] and email_configured():
+            try:send_email(row['email'],f'Programare confirmată — {row["shop_name"]}',body)
+            except Exception as e:print('Client booking confirmation email failed:',repr(e))
+        if row['phone'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
+            try:sms_notice(row['phone'],f'TunsPro: programarea ta la {row["shop_name"]} a fost confirmată pentru {when}, cu {row["staff_name"]}.')
+            except Exception as e:print('Client booking confirmation SMS failed:',repr(e))
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost confirmată.'})
     def checkout(self):
         with connect() as c:
             user=self.auth(c)
