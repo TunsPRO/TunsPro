@@ -89,6 +89,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS staff_time_off(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, kind TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT, label TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS staff_time_off_dates ON staff_time_off(staff_id,start_date,end_date);
         CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
+        CREATE TABLE IF NOT EXISTS booking_receipts(id INTEGER PRIMARY KEY, booking_id INTEGER NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, amount INTEGER NOT NULL CHECK(amount>=0), method TEXT NOT NULL CHECK(method IN ('cash','card','transfer')), received_at TEXT NOT NULL, recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL, updated TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS booking_receipts_shop_received ON booking_receipts(shop_id,received_at);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
         CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free', stripe_event_created INTEGER NOT NULL DEFAULT 0, current_period_start TEXT, payment_failed_at TEXT, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancel_at TEXT);
         CREATE TABLE IF NOT EXISTS stripe_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, event_created INTEGER NOT NULL, received TEXT NOT NULL);
@@ -723,7 +725,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
                 shop=c.execute('SELECT * FROM shops WHERE id=?',(user['shop_id'],)).fetchone()
                 if path=='/api/manage/dashboard':
-                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id WHERE b.shop_id=? AND b.status IN ('pending','confirmed','completed','cancelled') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
+                    svc=c.execute('SELECT * FROM services WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); team=c.execute('SELECT * FROM staff WHERE shop_id=? ORDER BY id',(shop['id'],)).fetchall(); bookings=c.execute("SELECT b.*,s.name service_name,s.duration,COALESCE(b.price_at_booking,s.price) price,t.name staff_name,br.amount collected_amount,br.method payment_method,br.received_at FROM bookings b JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id LEFT JOIN booking_receipts br ON br.booking_id=b.id AND br.shop_id=b.shop_id WHERE b.shop_id=? AND b.status IN ('pending','confirmed','completed','cancelled') ORDER BY b.starts",(shop['id'],)).fetchall(); sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(shop['id'],)).fetchone(); settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(shop['id'],)).fetchone()
                     if sub and sub['plan'] in PLAN_PRICES and sub['status'] in ('active','trialing') and not sub['paid_until'] and sub['stripe_subscription_id']:
                         try:
                             details=stripe_subscription_details(sub['stripe_subscription_id'])
@@ -812,6 +814,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/manage/bookings/confirm':return self.confirm_booking(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
             if path=='/api/manage/bookings/complete':return self.complete_booking(self.body_json())
+            if path=='/api/manage/bookings/receipt':return self.record_booking_receipt(self.body_json())
             if path=='/api/manage/client-note':return self.save_client_note(self.body_json())
             if path=='/api/billing/checkout':return self.checkout()
             if path=='/api/webhooks/stripe':return self.stripe_webhook()
@@ -1354,6 +1357,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         email_status=notify_email(client_email,f'Programare anulată — {shop_name}',body)
         sms_status=notify_sms(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata. Motiv: {reason}')
         return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată. Statusul notificărilor este afișat separat.','notifications':{'email':email_status,'sms':sms_status}})
+    def complete_booking(self,d):
+        with connect() as c:
+            user=self.auth(c)
+            if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
+            sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
+            if not active_subscription(sub):return self.json_response(403,{'error':'Gestionează programările cu un abonament activ.'})
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT id,starts,ends,status FROM bookings WHERE id=? AND shop_id=? AND status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
+            if not row:return self.json_response(404,{'error':'Programarea confirmată nu a fost găsită.'})
+            if datetime.fromisoformat(row['ends'])>now_utc():return self.json_response(400,{'error':'Poți marca serviciul ca încheiat după ora programării.'})
+            changed=c.execute("UPDATE bookings SET status='completed' WHERE id=? AND shop_id=? AND status='confirmed'",(row['id'],user['shop_id'])).rowcount
+            if not changed:return self.json_response(409,{'error':'Programarea a fost modificată. Reîncarcă agenda.'})
+            record_booking_event(c,row['id'],user['shop_id'],'booking_completed','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='confirmed',new_status='completed')
+        return self.json_response(200,{'ok':True})
+    def record_booking_receipt(self,d):
+        amount=d.get('amount');method=d.get('method')
+        if isinstance(amount,bool) or not isinstance(amount,int) or amount<1 or amount>10000000:return self.json_response(400,{'error':'Introdu suma efectiv încasată, între 1 și 10.000.000 lei.'})
+        if method not in ('cash','card','transfer'):return self.json_response(400,{'error':'Alege numerar, card sau transfer bancar.'})
+        try:booking_id=int(d.get('id',0))
+        except (TypeError,ValueError):return self.json_response(400,{'error':'Programarea selectată nu este validă.'})
+        with connect() as c:
+            user=self.auth(c)
+            if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
+            sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
+            if not active_subscription(sub) or not sub or sub['plan']!='business':return self.json_response(403,{'error':'Rapoartele de încasări sunt disponibile în planul BUSINESS.'})
+            booking=c.execute("SELECT id FROM bookings WHERE id=? AND shop_id=? AND status='completed'",(booking_id,user['shop_id'])).fetchone()
+            if not booking:return self.json_response(404,{'error':'Încasările pot fi înregistrate doar pentru servicii încheiate din frizeria ta.'})
+            received=iso_now()
+            c.execute('''INSERT INTO booking_receipts(booking_id,shop_id,amount,method,received_at,recorded_by,updated) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(booking_id) DO UPDATE SET amount=excluded.amount,method=excluded.method,received_at=excluded.received_at,recorded_by=excluded.recorded_by,updated=excluded.updated WHERE booking_receipts.shop_id=excluded.shop_id''',(booking_id,user['shop_id'],amount,method,received,user['id'],received))
+        return self.json_response(200,{'ok':True,'amount':amount,'method':method,'received_at':received})
     def confirm_booking(self,d):
         with connect() as c:
             user=self.auth(c)
