@@ -27,7 +27,9 @@ Baza de date `tunspro.sqlite3` este creată la prima pornire. Nu deschide `index
 
 ## Plăți reale
 
-Copiază `.env.example` ca `.env`. Configurează `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` și `PUBLIC_URL`. Creează endpoint webhook Stripe către `PUBLIC_URL/api/webhooks/stripe` și abonează-l la `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded` și `invoice.payment_failed`. Pentru dezvoltare folosește chei de test Stripe. Checkout creează abonamentul lunar la 49 RON; webhook-ul, nu redirectul din browser, stabilește dacă frizeria este activă.
+Copiază `.env.example` ca `.env`. Configurează `STRIPE_SECRET_KEY` și `PUBLIC_URL`. Creează endpointuri webhook pentru Stripe Live și Sandbox către `PUBLIC_URL/api/webhooks/stripe`, cu evenimentele `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`, `invoice.paid`, `charge.refunded`, `refund.created`, `refund.updated` și `refund.failed`. Salvează separat secretele endpointurilor în `STRIPE_WEBHOOK_SECRET_LIVE` și `STRIPE_WEBHOOK_SECRET_TEST` în Render. Semnătura este verificată pe corpul brut, în limita temporală Stripe; ID-urile evenimentelor și rambursărilor sunt deduplicate, iar actualizările de abonament/plată protejează datele mai noi de evenimente sosite în altă ordine. Pentru dezvoltare folosește chei de test Stripe. Checkout creează abonamentul lunar; webhook-ul, nu redirectul din browser, stabilește dacă frizeria este activă.
+
+Istoricul local începe cu evenimentele primite după configurarea webhook-ului; Stripe poate avea tranzacții mai vechi care nu au fost importate în aplicație. În Admin, venitul lunar include doar facturile efectiv încasate în Live, minus rambursările și înainte de comisioane. Plățile test și facturile achitate în afara Stripe nu sunt numărate ca încasări Stripe. Nu stocăm datele complete ale cardului.
 
 Stripe suportă comercianți din România și abonamente recurente prin Checkout; verifică setările și disponibilitatea actuală ale contului înainte de lansare: [disponibilitate Stripe](https://stripe.com/global), [API Checkout Sessions](https://docs.stripe.com/api/checkout/sessions/create).
 
@@ -57,7 +59,7 @@ Fișierul `render.yaml` pregătește serviciul web și discul persistent pentru 
 1. Creează un cont GitHub și un repository privat. Încarcă în repository conținutul acestui folder (`outputs/tunspro`), fără fișierul `.env`.
 2. Creează un cont Render și conectează GitHub. Din Render alege **New → Blueprint**, apoi selectează repository-ul.
 3. La configurare, introdu `PUBLIC_URL` ca URL-ul serviciului Render (de exemplu `https://tunspro.onrender.com`; verifică numele disponibil în dashboard). Adaugă cheia Stripe de test în `STRIPE_SECRET_KEY`. Nu pune chei secrete în repository, în fișierele publice sau în mesaje.
-4. După publicare, verifică URL-ul aplicației și corectează `PUBLIC_URL` în **Environment** dacă diferă. În Stripe, creează webhook-ul la `https://<domeniul-aplicației>/api/webhooks/stripe`, selectează evenimentele enumerate în secțiunea **Plăți reale**, apoi copiază secretul webhook în `STRIPE_WEBHOOK_SECRET` din Render și redeployează.
+4. După publicare, verifică URL-ul aplicației și corectează `PUBLIC_URL` în **Environment** dacă diferă. În Stripe, creează câte un webhook în Live și Sandbox la `https://<domeniul-aplicației>/api/webhooks/stripe`, selectează cele unsprezece evenimente din secțiunea **Plăți reale**, apoi copiază fiecare secret în variabila corespunzătoare din Render (`STRIPE_WEBHOOK_SECRET_LIVE` sau `STRIPE_WEBHOOK_SECRET_TEST`) și redeployează.
 5. E-mailul și SMS-ul sunt opționale; completează variabilele lor în Render când ai conturile furnizorilor. Testează cu Stripe în modul test înainte să treci la chei live.
 
 ## Panoul Admin
