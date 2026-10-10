@@ -329,11 +329,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path=='/api/admin/bookings.csv':
             with connect() as c:
                 if not self.admin_auth(c):return self.json_response(401,{'error':'Autentificare de administrator necesară.'})
-                rows=c.execute('SELECT b.client,b.phone,b.email,sh.name shop_name,sh.city,s.name service_name,t.name staff_name,b.starts,b.ends,b.status,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC').fetchall()
+                rows=c.execute('SELECT b.id,b.client,b.phone,b.email,sh.name shop_name,sh.city,s.name service_name,t.name staff_name,b.starts,b.ends,s.duration,b.status,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC,b.id DESC').fetchall()
             import csv,io
-            stream=io.StringIO(newline='');writer=csv.writer(stream);writer.writerow(['Client','Telefon','E-mail','Frizerie','Localitate','Serviciu','Frizer','Început','Sfârșit','Status','Preț RON'])
+            stream=io.StringIO(newline='');writer=csv.writer(stream);writer.writerow(['ID programare','Client','Telefon','E-mail','Frizerie','Localitate','Serviciu','Frizer','Început (Europe/Bucharest)','Sfârșit (Europe/Bucharest)','Durată minute','Status','Preț RON'])
             for row in rows:
-                values=[row['client'],row['phone'],row['email'],row['shop_name'],row['city'],row['service_name'],row['staff_name'],datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),datetime.fromisoformat(row['ends']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),row['status'],row['price']]
+                values=[row['id'],row['client'],row['phone'],row['email'],row['shop_name'],row['city'],row['service_name'],row['staff_name'],datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),datetime.fromisoformat(row['ends']).astimezone(TZ).strftime('%Y-%m-%d %H:%M'),row['duration'],row['status'],row['price']]
                 writer.writerow([("'"+v if isinstance(v,str) and v.startswith(('=','+','-','@')) else v) for v in values])
             body=('\ufeff'+stream.getvalue()).encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/csv; charset=utf-8');self.send_header('Content-Disposition','attachment; filename="tunspro-programari.csv"');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
         if path.startswith('/media/'):
@@ -379,7 +379,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 owners=c.execute('SELECT u.id,u.email,u.owner,u.created,u.last_login,u.status,sh.name shop_name,sh.city,sub.plan,sub.status subscription_status,sub.paid_until FROM users u JOIN shops sh ON sh.user_id=u.id LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY u.created DESC').fetchall()
                 customers=c.execute('SELECT c.id,c.name,c.email,c.phone,c.created,c.last_login,c.status,COUNT(b.id) booking_count FROM customers c LEFT JOIN bookings b ON b.customer_id=c.id GROUP BY c.id ORDER BY c.created DESC').fetchall()
                 admins=c.execute('SELECT id,email,created,last_login FROM admins ORDER BY created').fetchall()
-                bookings=c.execute('SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.created,b.status,b.price_at_booking,b.promo_code,b.discount_amount,sh.name shop_name,sh.city,s.name service_name,s.duration,t.name staff_name,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC LIMIT 500').fetchall()
+                bookings=c.execute('SELECT b.id,b.client,b.phone,b.email,b.starts,b.ends,b.created,b.status,b.price_at_booking,b.promo_code,b.discount_amount,sh.name shop_name,sh.city,s.name service_name,s.duration,t.name staff_name,COALESCE(b.price_at_booking,s.price) price FROM bookings b JOIN shops sh ON sh.id=b.shop_id JOIN services s ON s.id=b.service_id JOIN staff t ON t.id=b.staff_id ORDER BY b.starts DESC,b.id DESC').fetchall()
                 staff_rows=c.execute('SELECT t.id,t.shop_id,t.name,t.role,t.photo,t.active,sh.name shop_name,sh.city,(SELECT COUNT(*) FROM bookings b WHERE b.staff_id=t.id) booking_count FROM staff t JOIN shops sh ON sh.id=t.shop_id ORDER BY sh.name,t.name').fetchall()
                 service_rows=c.execute('SELECT s.id,s.shop_id,s.name,s.description,s.duration,s.price,s.active,sh.name shop_name,sh.city,(SELECT COUNT(*) FROM bookings b WHERE b.service_id=s.id) booking_count FROM services s JOIN shops sh ON sh.id=s.shop_id ORDER BY sh.name,s.name').fetchall()
                 review_rows=c.execute('SELECT r.id,r.booking_id,r.shop_id,r.rating,r.comment,r.created,r.is_visible,b.client,s.name service_name,sh.name shop_name FROM reviews r JOIN bookings b ON b.id=r.booking_id JOIN services s ON s.id=b.service_id JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
@@ -388,7 +388,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 payments=c.execute('SELECT p.*,sh.name shop_name FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id ORDER BY COALESCE(p.paid_at,p.created) DESC LIMIT 500').fetchall()
                 refunds=c.execute('SELECT r.*,sh.name shop_name FROM refunds r LEFT JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
                 subscription_history=c.execute('SELECT h.*,sh.name shop_name FROM subscription_history h LEFT JOIN shops sh ON sh.id=h.shop_id ORDER BY h.event_created DESC LIMIT 200').fetchall()
-                booking_history=c.execute('SELECT a.*,b.client,sh.name shop_name FROM booking_audit a LEFT JOIN bookings b ON b.id=a.booking_id LEFT JOIN shops sh ON sh.id=a.shop_id ORDER BY a.created DESC LIMIT 500').fetchall()
+                booking_history=c.execute("SELECT a.*,b.client,sh.name shop_name,CASE WHEN a.actor_type='barber' THEN COALESCE(u.owner,u.email) WHEN a.actor_type='client' THEN COALESCE(c.name,b.client) ELSE a.actor_type END actor_name FROM booking_audit a LEFT JOIN bookings b ON b.id=a.booking_id LEFT JOIN shops sh ON sh.id=a.shop_id LEFT JOIN users u ON a.actor_type='barber' AND u.id=a.actor_id LEFT JOIN customers c ON a.actor_type='client' AND c.id=a.actor_id ORDER BY a.created DESC LIMIT 500").fetchall()
                 daily_7=[];daily_30=[]
                 for offset in range(29,-1,-1):
                     day=local_today-timedelta(days=offset);start=datetime.combine(day,time.min,TZ).isoformat();end=datetime.combine(day+timedelta(days=1),time.min,TZ).isoformat();point={'date':day.isoformat(),'count':count("SELECT COUNT(*) FROM bookings WHERE starts>=? AND starts<? AND status IN ('confirmed','completed')",(start,end))}
@@ -448,7 +448,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     slots=[]
                     if hours and len(hours)==2:
                         start=datetime.combine(day,time.fromisoformat(hours[0]),TZ); end=datetime.combine(day,time.fromisoformat(hours[1]),TZ)
-                        rows=c.execute("SELECT starts,ends FROM bookings WHERE staff_id=? AND status='confirmed' AND starts<? AND ends>?",(staff_id,end.isoformat(),start.isoformat())).fetchall()
+                        rows=c.execute("SELECT starts,ends FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff_id,end.isoformat(),start.isoformat())).fetchall()
                         busy=[(datetime.fromisoformat(x['starts']).astimezone(TZ),datetime.fromisoformat(x['ends']).astimezone(TZ)) for x in rows]
                         cursor=start
                         while cursor+timedelta(minutes=service['duration'])<=end:
@@ -927,7 +927,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()))
             finish=starts+timedelta(minutes=service['duration'])
             if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):raise ValueError('Ora aleasă este în afara programului frizerului.')
-            collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status='confirmed' AND starts<? AND ends>?",(staff['id'],finish.isoformat(),starts.isoformat())).fetchone()
+            collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:raise ValueError('Ora tocmai a fost rezervată. Alege alt interval.')
             promo_code=str(d.get('promo_code','')).strip().upper();discount_amount=0
             if promo_code:
@@ -999,7 +999,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu mai este disponibil.'})
             sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()));finish=starts+timedelta(minutes=service['duration'])
             if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):return self.json_response(400,{'error':'Ora aleasă este în afara programului frizerului.'})
-            collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status='confirmed' AND id<>? AND starts<? AND ends>?",(staff['id'],row['id'],finish.isoformat(),starts.isoformat())).fetchone()
+            collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND id<>? AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff['id'],row['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:return self.json_response(409,{'error':'Ora tocmai a fost rezervată. Alege alt interval.'})
             reminder_at=starts-timedelta(hours=24);reminder_sent=0
             if reminder_at<=now_utc():
@@ -1069,7 +1069,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
             sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(user['shop_id'],)).fetchone()
             if not active_subscription(sub):return self.json_response(403,{'error':'Gestionează programările cu un abonament PRO sau BUSINESS activ.'})
-            row=c.execute("SELECT id,ends FROM bookings WHERE id=? AND shop_id=? AND status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
+            row=c.execute("SELECT id,starts,ends FROM bookings WHERE id=? AND shop_id=? AND status='confirmed'",(int(d.get('id',0)),user['shop_id'])).fetchone()
             if not row:return self.json_response(404,{'error':'Programarea nu a fost găsită.'})
             if datetime.fromisoformat(row['ends'])>now_utc():return self.json_response(400,{'error':'Programarea poate fi încheiată după ora rezervată.'})
             c.execute("UPDATE bookings SET status='completed' WHERE id=?",(row['id'],))
