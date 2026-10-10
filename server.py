@@ -84,7 +84,7 @@ def init_db():
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
         CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
-        CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, photo TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', weekly_breaks TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS staff_time_off(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, kind TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT, label TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS staff_time_off_dates ON staff_time_off(staff_id,start_date,end_date);
@@ -117,7 +117,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
-        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_email_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_sms_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('services','photo',"TEXT NOT NULL DEFAULT ''"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_email_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_sms_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'photo' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
@@ -385,7 +385,7 @@ def shop_public(c, shop):
     if not approval or approval['approval_status']!='approved':return None
     sub = c.execute('SELECT * FROM subscriptions WHERE shop_id=?', (shop['id'],)).fetchone()
     if not active_subscription(sub) or not shop['listing_enabled']: return None
-    svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
+    svc = c.execute('SELECT id,name,description,duration,price,photo FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     team = c.execute('SELECT id,name,role,photo,weekly_schedule,weekly_breaks FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
     reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? AND is_visible=1 ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
@@ -811,6 +811,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path=='/api/admin/promo-codes':return self.admin_promo_codes(self.body_json())
             if path=='/api/manage/photos':return self.upload_photo(self.body_json())
             if path=='/api/manage/staff-photo':return self.upload_staff_photo(self.body_json())
+            if path=='/api/manage/service-photo':return self.upload_service_photo(self.body_json())
             if path=='/api/manage/bookings/confirm':return self.confirm_booking(self.body_json())
             if path=='/api/manage/bookings/cancel':return self.cancel_booking(self.body_json())
             if path=='/api/manage/bookings/complete':return self.complete_booking(self.body_json())
@@ -965,6 +966,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not signatures[ext]:raise ValueError('Fișierul nu pare a fi o imagine validă.')
         name=uuid.uuid4().hex+'.'+ext;MEDIA_DIR.mkdir(parents=True,exist_ok=True);(MEDIA_DIR/name).write_bytes(raw);url='/media/'+name
         with connect() as c:c.execute('UPDATE staff SET photo=? WHERE id=? AND shop_id=?',(url,staff['id'],user['shop_id']))
+        return self.json_response(201,{'ok':True,'url':url})
+    def upload_service_photo(self,d):
+        with connect() as c:
+            user=self.auth(c)
+            if not user:return self.json_response(401,{'error':'Conectează-te pentru a continua.'})
+            service=c.execute('SELECT id,photo FROM services WHERE id=? AND shop_id=?',(int(d.get('service_id',0)),user['shop_id'])).fetchone()
+            if not service:return self.json_response(404,{'error':'Serviciul nu a fost găsit în frizeria ta.'})
+        old=service['photo'] or ''
+        if d.get('remove'):
+            with connect() as c:c.execute("UPDATE services SET photo='' WHERE id=? AND shop_id=?",(service['id'],user['shop_id']))
+            if old.startswith('/media/') and re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',old):(MEDIA_DIR/old.rsplit('/',1)[-1]).unlink(missing_ok=True)
+            return self.json_response(200,{'ok':True,'url':''})
+        data=str(d.get('data',''))
+        match=re.fullmatch(r'data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]+=*)',data)
+        if not match:raise ValueError('Încarcă o fotografie JPG, PNG sau WebP.')
+        raw=base64.b64decode(match.group(2),validate=True)
+        if not raw or len(raw)>1_500_000:raise ValueError('Fotografia trebuie să aibă maximum 1,5 MB după comprimare.')
+        ext={'jpeg':'jpg','png':'png','webp':'webp'}[match.group(1)]
+        signatures={'jpg':raw.startswith(b'\xff\xd8\xff'),'png':raw.startswith(b'\x89PNG\r\n\x1a\n'),'webp':len(raw)>12 and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP'}
+        if not signatures[ext]:raise ValueError('Fișierul nu pare a fi o imagine validă.')
+        name=uuid.uuid4().hex+'.'+ext;MEDIA_DIR.mkdir(parents=True,exist_ok=True);(MEDIA_DIR/name).write_bytes(raw);url='/media/'+name
+        with connect() as c:c.execute('UPDATE services SET photo=? WHERE id=? AND shop_id=?',(url,service['id'],user['shop_id']))
+        if old.startswith('/media/') and re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',old):(MEDIA_DIR/old.rsplit('/',1)[-1]).unlink(missing_ok=True)
         return self.json_response(201,{'ok':True,'url':url})
     def login(self,d):
         email=str(d.get('email','')).lower().strip();key=login_limit_key('barber',email)
