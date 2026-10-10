@@ -15,6 +15,7 @@ MEDIA_DIR = DB_PATH.parent / 'uploads'
 PORT = int(os.environ.get('PORT', '8765'))
 TZ = ZoneInfo('Europe/Bucharest')
 PLAN_PRICES = {'pro': 4900, 'business': 9900}
+SUBSCRIPTION_GRACE_DAYS = max(0, min(30, int(os.environ.get('SUBSCRIPTION_GRACE_DAYS', '7'))))
 
 def load_env():
     p = ROOT / '.env'
@@ -40,11 +41,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
-        CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free', stripe_event_created INTEGER NOT NULL DEFAULT 0, current_period_start TEXT);
+        CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free', stripe_event_created INTEGER NOT NULL DEFAULT 0, current_period_start TEXT, payment_failed_at TEXT, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancel_at TEXT);
         CREATE TABLE IF NOT EXISTS stripe_events(event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, event_created INTEGER NOT NULL, received TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, stripe_invoice_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_customer_id TEXT, stripe_subscription_id TEXT, amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'ron', status TEXT NOT NULL, paid_at TEXT, invoice_url TEXT, created TEXT NOT NULL, stripe_event_created INTEGER NOT NULL DEFAULT 0, refunded_amount INTEGER NOT NULL DEFAULT 0, stripe_payment_intent_id TEXT);
         CREATE TABLE IF NOT EXISTS refunds(id INTEGER PRIMARY KEY, stripe_refund_id TEXT NOT NULL UNIQUE, stripe_invoice_id TEXT, stripe_charge_id TEXT, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'ron', status TEXT NOT NULL, created TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS subscription_history(id INTEGER PRIMARY KEY, stripe_event_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_subscription_id TEXT, event_type TEXT NOT NULL, status TEXT, plan TEXT, period_start TEXT, period_end TEXT, event_created INTEGER NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS subscription_history(id INTEGER PRIMARY KEY, stripe_event_id TEXT NOT NULL UNIQUE, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, stripe_subscription_id TEXT, event_type TEXT NOT NULL, status TEXT, plan TEXT, period_start TEXT, period_end TEXT, event_created INTEGER NOT NULL, created TEXT NOT NULL, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancel_at TEXT);
         CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY, admin_email TEXT NOT NULL, action TEXT NOT NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, details TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS booking_audit(id INTEGER PRIMARY KEY, booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL, shop_id INTEGER REFERENCES shops(id) ON DELETE SET NULL, action TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id INTEGER, old_starts TEXT, new_starts TEXT, old_status TEXT, new_status TEXT, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS login_limits(email_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0, window_start TEXT NOT NULL, blocked_until TEXT);
@@ -74,6 +75,12 @@ def init_db():
             c.execute('ALTER TABLE subscriptions ADD COLUMN stripe_event_created INTEGER NOT NULL DEFAULT 0')
         if 'current_period_start' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
             c.execute('ALTER TABLE subscriptions ADD COLUMN current_period_start TEXT')
+        for column,definition in [('payment_failed_at','TEXT'),('cancel_at_period_end','INTEGER NOT NULL DEFAULT 0'),('cancel_at','TEXT')]:
+            if column not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
+                c.execute(f'ALTER TABLE subscriptions ADD COLUMN {column} {definition}')
+        for column,definition in [('cancel_at_period_end','INTEGER NOT NULL DEFAULT 0'),('cancel_at','TEXT')]:
+            if column not in {row['name'] for row in c.execute('PRAGMA table_info(subscription_history)')}:
+                c.execute(f'ALTER TABLE subscription_history ADD COLUMN {column} {definition}')
         if 'stripe_event_created' not in {row['name'] for row in c.execute('PRAGMA table_info(payments)')}:
             c.execute('ALTER TABLE payments ADD COLUMN stripe_event_created INTEGER NOT NULL DEFAULT 0')
         for column,definition in [('refunded_amount','INTEGER NOT NULL DEFAULT 0'),('stripe_payment_intent_id','TEXT')]:
@@ -148,8 +155,8 @@ def login_failure(c,key):
 def login_success(c,key): c.execute('DELETE FROM login_limits WHERE email_hash=?',(key,))
 def record_booking_event(c,booking_id,shop_id,action,actor_type,actor_id=None,old_starts=None,new_starts=None,old_status=None,new_status=None):
     c.execute('INSERT INTO booking_audit(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(booking_id,shop_id,action,actor_type,actor_id,old_starts,new_starts,old_status,new_status,iso_now()))
-def record_subscription_event(c,event_id,event_type,event_created,shop_id,stripe_sub,status,plan,period_start,period_end):
-    c.execute('INSERT OR IGNORE INTO subscription_history(stripe_event_id,shop_id,stripe_subscription_id,event_type,status,plan,period_start,period_end,event_created,created) VALUES(?,?,?,?,?,?,?,?,?,?)',(event_id,shop_id,stripe_sub,event_type,status,plan,period_start,period_end,event_created,iso_now()))
+def record_subscription_event(c,event_id,event_type,event_created,shop_id,stripe_sub,status,plan,period_start,period_end,cancel_at_period_end=False,cancel_at=None):
+    c.execute('INSERT OR IGNORE INTO subscription_history(stripe_event_id,shop_id,stripe_subscription_id,event_type,status,plan,period_start,period_end,event_created,created,cancel_at_period_end,cancel_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(event_id,shop_id,stripe_sub,event_type,status,plan,period_start,period_end,event_created,iso_now(),int(bool(cancel_at_period_end)),cancel_at))
 def password_hash(password, salt=None):
     salt = salt or secrets.token_bytes(16)
     result = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 240000)
@@ -199,8 +206,12 @@ def stripe_business_upgrade_session(key,customer_id,subscription_id,return_url):
     return stripe_api(key,'billing_portal/sessions',params)
 
 def active_subscription(row):
-    if not row or row['plan'] not in PLAN_PRICES or row['status'] not in ('active', 'trialing') or not row['paid_until']: return False
-    try: return datetime.fromisoformat(row['paid_until'].replace('Z', '+00:00')) > now_utc()
+    if not row or row['plan'] not in PLAN_PRICES:return False
+    if row['status']=='past_due' and SUBSCRIPTION_GRACE_DAYS and 'payment_failed_at' in row.keys() and row['payment_failed_at']:
+        try:return datetime.fromisoformat(row['payment_failed_at'].replace('Z','+00:00'))+timedelta(days=SUBSCRIPTION_GRACE_DAYS)>now_utc()
+        except ValueError:return False
+    if row['status'] not in ('active','trialing') or not row['paid_until']:return False
+    try:return datetime.fromisoformat(row['paid_until'].replace('Z', '+00:00')) > now_utc()
     except ValueError: return False
 
 def shop_public(c, shop):
@@ -384,10 +395,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 service_rows=c.execute('SELECT s.id,s.shop_id,s.name,s.description,s.duration,s.price,s.active,sh.name shop_name,sh.city,(SELECT COUNT(*) FROM bookings b WHERE b.service_id=s.id) booking_count FROM services s JOIN shops sh ON sh.id=s.shop_id ORDER BY sh.name,s.name').fetchall()
                 review_rows=c.execute('SELECT r.id,r.booking_id,r.shop_id,r.rating,r.comment,r.created,r.is_visible,b.client,s.name service_name,sh.name shop_name FROM reviews r JOIN bookings b ON b.id=r.booking_id JOIN services s ON s.id=b.service_id JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
                 promo_codes=c.execute('SELECT * FROM promo_codes ORDER BY created DESC').fetchall()
-                subscriptions=c.execute('SELECT sh.id shop_id,sh.name shop_name,sh.city,sub.status,sub.plan,sub.current_period_start,sub.paid_until,sub.stripe_subscription_id FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sub.paid_until DESC').fetchall()
+                subscriptions=c.execute('SELECT sh.id shop_id,sh.name shop_name,sh.city,sub.status,sub.plan,sub.current_period_start,sub.paid_until,sub.stripe_subscription_id,sub.payment_failed_at,sub.cancel_at_period_end,sub.cancel_at FROM shops sh LEFT JOIN subscriptions sub ON sub.shop_id=sh.id ORDER BY sub.paid_until DESC').fetchall()
                 payments=c.execute('SELECT p.*,sh.name shop_name FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id ORDER BY COALESCE(p.paid_at,p.created) DESC LIMIT 500').fetchall()
                 refunds=c.execute('SELECT r.*,sh.name shop_name FROM refunds r LEFT JOIN shops sh ON sh.id=r.shop_id ORDER BY r.created DESC LIMIT 500').fetchall()
                 subscription_history=c.execute('SELECT h.*,sh.name shop_name FROM subscription_history h LEFT JOIN shops sh ON sh.id=h.shop_id ORDER BY h.event_created DESC LIMIT 200').fetchall()
+                subscription_rows=[]
+                for item in subscriptions:
+                    sub=dict(item);plan=str(sub.get('plan') or 'free').lower();raw_status=sub.get('status') or 'inactive';sub['price_monthly']=PLAN_PRICES.get(plan,0);sub['stripe_status']=raw_status
+                    renewal=None
+                    try:
+                        renewal=datetime.fromisoformat(str(sub['paid_until']).replace('Z','+00:00')) if sub.get('paid_until') else None
+                        if renewal and renewal.tzinfo is None:renewal=renewal.replace(tzinfo=timezone.utc)
+                        sub['days_to_renewal']=max(0,int((renewal-now_utc()).total_seconds()/86400+0.999999)) if renewal and renewal>now_utc() else None
+                    except (TypeError,ValueError):sub['days_to_renewal']=None
+                    if raw_status=='past_due':
+                        try:
+                            failed=datetime.fromisoformat(str(sub['payment_failed_at']).replace('Z','+00:00')) if sub.get('payment_failed_at') else None
+                            if failed and failed.tzinfo is None:failed=failed.replace(tzinfo=timezone.utc)
+                            sub['status_label']='grace' if failed and SUBSCRIPTION_GRACE_DAYS and now_utc()<failed+timedelta(days=SUBSCRIPTION_GRACE_DAYS) else 'unpaid'
+                        except (TypeError,ValueError):sub['status_label']='unpaid'
+                    elif raw_status in ('active','trialing') and sub.get('paid_until'):
+                        try:sub['status_label']='expired' if renewal and renewal<=now_utc() else 'active'
+                        except (TypeError,ValueError):sub['status_label']='active'
+                    elif raw_status in ('unpaid','incomplete','incomplete_expired','paused'):sub['status_label']='unpaid' if raw_status=='unpaid' else 'pending'
+                    elif raw_status in ('canceled','cancelled'):sub['status_label']='canceled'
+                    else:sub['status_label']=raw_status
+                    if raw_status not in ('active','trialing','past_due') or not renewal or renewal<=now_utc():sub['days_to_renewal']=None
+                    subscription_rows.append(sub)
+                counts['active_subscriptions']=sum(1 for sub in subscription_rows if sub.get('status_label')=='active')
+                counts['expired_subscriptions']=sum(1 for sub in subscription_rows if sub.get('status_label')=='expired')
+                for horizon in (7,30):
+                    counts[f'subscriptions_expiring_{horizon}']=sum(1 for sub in subscription_rows if sub.get('status_label') in ('active','grace') and sub.get('days_to_renewal') is not None and sub['days_to_renewal']<=horizon)
                 booking_history=c.execute("SELECT a.*,b.client,sh.name shop_name,CASE WHEN a.actor_type='barber' THEN COALESCE(u.owner,u.email) WHEN a.actor_type='client' THEN COALESCE(c.name,b.client) ELSE a.actor_type END actor_name FROM booking_audit a LEFT JOIN bookings b ON b.id=a.booking_id LEFT JOIN shops sh ON sh.id=a.shop_id LEFT JOIN users u ON a.actor_type='barber' AND u.id=a.actor_id LEFT JOIN customers c ON a.actor_type='client' AND c.id=a.actor_id ORDER BY a.created DESC LIMIT 500").fetchall()
                 daily_7=[];daily_30=[]
                 for offset in range(29,-1,-1):
@@ -422,7 +460,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 activity.extend({'id':'failed-'+str(x['id']),'action':'payment_failed','shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'source':'system'} for x in c.execute("SELECT p.id,p.shop_id,sh.name shop_name,p.created FROM payments p LEFT JOIN shops sh ON sh.id=p.shop_id WHERE p.status='failed' AND p.livemode=1 ORDER BY p.created DESC LIMIT 10").fetchall())
                 activity.extend({'id':'booking-'+str(x['id']),'action':x['action'],'shop_id':x['shop_id'],'shop_name':x['shop_name'],'created':x['created'],'actor_type':x['actor_type'],'source':'booking'} for x in c.execute("SELECT a.id,a.action,a.shop_id,sh.name shop_name,a.created,a.actor_type FROM booking_audit a LEFT JOIN shops sh ON sh.id=a.shop_id WHERE a.action='booking_cancelled' ORDER BY a.created DESC LIMIT 10").fetchall())
                 activity=sorted(activity,key=lambda x:x.get('created') or '',reverse=True)[:30]
-                return self.json_response(200,{'counts':{**counts,'active_services':active_services,'active_staff':active_staff,'visible_reviews':review_summary['count'],'average_rating':round(review_summary['average'],2) if review_summary['average'] else None,'hidden_reviews':hidden_reviews,'occupancy_rate_30':occupancy_rate},'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'admins':[dict(x) for x in admins],'staff':[dict(x) for x in staff_rows],'services':[dict(x) for x in service_rows],'reviews':[dict(x) for x in review_rows],'promo_codes':[dict(x) for x in promo_codes],'bookings':[dict(x) for x in bookings],'subscriptions':[dict(x) for x in subscriptions],'subscription_history':[dict(x) for x in subscription_history],'payments':[dict(x) for x in payments],'refunds':[dict(x) for x in refunds],'booking_history':[dict(x) for x in booking_history],'activity':activity,'booking_activity':daily_7,'booking_activity_30':daily_30,'monthly':monthly,'service_mix':service_mix,'top_services':top_services,'top_shops':top_shops,'integrations':{'stripe':bool(os.environ.get('STRIPE_SECRET_KEY')),'email':email_configured(),'sms':bool(os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'))}})
+                return self.json_response(200,{'counts':{**counts,'active_services':active_services,'active_staff':active_staff,'visible_reviews':review_summary['count'],'average_rating':round(review_summary['average'],2) if review_summary['average'] else None,'hidden_reviews':hidden_reviews,'occupancy_rate_30':occupancy_rate},'shops':[dict(x) for x in shops],'owners':[dict(x) for x in owners],'customers':[dict(x) for x in customers],'admins':[dict(x) for x in admins],'staff':[dict(x) for x in staff_rows],'services':[dict(x) for x in service_rows],'reviews':[dict(x) for x in review_rows],'promo_codes':[dict(x) for x in promo_codes],'bookings':[dict(x) for x in bookings],'subscriptions':subscription_rows,'subscription_history':[dict(x) for x in subscription_history],'subscription_grace_days':SUBSCRIPTION_GRACE_DAYS,'payments':[dict(x) for x in payments],'refunds':[dict(x) for x in refunds],'booking_history':[dict(x) for x in booking_history],'activity':activity,'booking_activity':daily_7,'booking_activity_30':daily_30,'monthly':monthly,'service_mix':service_mix,'top_services':top_services,'top_shops':top_shops,'integrations':{'stripe':bool(os.environ.get('STRIPE_SECRET_KEY')),'email':email_configured(),'sms':bool(os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'))}})
         if path=='/api/public/shops':
             term=search_norm(q.get('q',[''])[0]).strip()
             with connect() as c:
@@ -477,7 +515,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     try:shop_data['photos']=json.loads(shop_data.get('photos') or '[]')
                     except (TypeError,ValueError):shop_data['photos']=[]
                     if not isinstance(shop_data['photos'],list):shop_data['photos']=[]
-                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until']},'notifications':dict(settings) if settings else {}})
+                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':[dict(x) for x in bookings] if paid else [],'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
@@ -1124,19 +1162,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     shop_id=int(obj.get('metadata',{}).get('shop_id','0') or 0);stripe_sub=obj.get('subscription');status='active' if obj.get('payment_status')=='paid' else 'incomplete';plan=obj.get('metadata',{}).get('plan','pro')
                     if shop_id and stripe_sub and plan in PLAN_PRICES:
                         details=checkout_details or {};period_start=datetime.fromtimestamp(details['current_period_start'],timezone.utc).isoformat() if details.get('current_period_start') else None;paid_until=datetime.fromtimestamp(details['current_period_end'],timezone.utc).isoformat() if details.get('current_period_end') else None
-                        updated=c.execute("UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,stripe_event_created=?,current_period_start=COALESCE(?,current_period_start),paid_until=COALESCE(?,paid_until) WHERE shop_id=? AND stripe_event_created<=?",(status,plan,obj.get('customer'),stripe_sub,event_created,period_start,paid_until,shop_id,event_created))
+                        updated=c.execute("UPDATE subscriptions SET status=?,plan=?,stripe_customer_id=?,stripe_subscription_id=?,stripe_event_created=?,current_period_start=COALESCE(?,current_period_start),paid_until=COALESCE(?,paid_until),payment_failed_at=NULL,cancel_at_period_end=0,cancel_at=NULL WHERE shop_id=? AND stripe_event_created<=?",(status,plan,obj.get('customer'),stripe_sub,event_created,period_start,paid_until,shop_id,event_created))
                         if updated.rowcount:record_subscription_event(c,event_id,typ,event_created,shop_id,stripe_sub,status,plan,period_start,paid_until)
                 elif typ.startswith('customer.subscription.'):
                     stripe_sub=obj.get('id');status=obj.get('status','active');paid_until=datetime.fromtimestamp(obj['current_period_end'],timezone.utc).isoformat() if obj.get('current_period_end') else None;period_start=datetime.fromtimestamp(obj['current_period_start'],timezone.utc).isoformat() if obj.get('current_period_start') else None
                     item_plans=[x.get('price',{}).get('metadata',{}).get('plan') for x in obj.get('items',{}).get('data',[]) if x.get('price',{}).get('metadata',{}).get('plan') in PLAN_PRICES]
                     plan=(item_plans[0] if item_plans else None) or obj.get('metadata',{}).get('plan');shop_id=int(obj.get('metadata',{}).get('shop_id','0') or 0)
                     if stripe_sub:
-                        updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=COALESCE(?,stripe_customer_id),paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),paid_until,period_start,event_created,stripe_sub,event_created))
+                        cancel_at=datetime.fromtimestamp(obj['cancel_at'],timezone.utc).isoformat() if obj.get('cancel_at') else None
+                        updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=COALESCE(?,stripe_customer_id),paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),cancel_at_period_end=?,cancel_at=?,payment_failed_at=CASE WHEN ? IN (\'active\',\'trialing\') THEN NULL ELSE payment_failed_at END,stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),paid_until,period_start,int(bool(obj.get('cancel_at_period_end'))),cancel_at,status,event_created,stripe_sub,event_created))
                         if updated.rowcount==0 and shop_id:
-                            updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),stripe_event_created=? WHERE shop_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,period_start,event_created,shop_id,event_created))
+                            updated=c.execute('UPDATE subscriptions SET status=?,plan=COALESCE(?,plan),stripe_customer_id=?,stripe_subscription_id=?,paid_until=COALESCE(?,paid_until),current_period_start=COALESCE(?,current_period_start),cancel_at_period_end=?,cancel_at=?,payment_failed_at=CASE WHEN ? IN (\'active\',\'trialing\') THEN NULL ELSE payment_failed_at END,stripe_event_created=? WHERE shop_id=? AND stripe_event_created<=?',(status,plan,obj.get('customer'),stripe_sub,paid_until,period_start,int(bool(obj.get('cancel_at_period_end'))),cancel_at,status,event_created,shop_id,event_created))
                         if updated.rowcount:
                             linked=c.execute('SELECT shop_id,plan FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone()
-                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else shop_id,stripe_sub,status,plan or (linked['plan'] if linked else None),period_start,paid_until)
+                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else shop_id,stripe_sub,status,plan or (linked['plan'] if linked else None),period_start,paid_until,bool(obj.get('cancel_at_period_end')),cancel_at)
                 elif typ in ('invoice.payment_succeeded','invoice.payment_failed'):
                     invoice_id=obj.get('id');stripe_sub=obj.get('subscription');stripe_sub=stripe_sub.get('id') if isinstance(stripe_sub,dict) else stripe_sub;livemode=int(bool(event.get('livemode')))
                     if not stripe_sub:stripe_sub=(obj.get('parent',{}).get('subscription_details',{}) or {}).get('subscription')
@@ -1149,11 +1188,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(stripe_invoice_id) DO UPDATE SET shop_id=COALESCE(excluded.shop_id,payments.shop_id),stripe_customer_id=COALESCE(excluded.stripe_customer_id,payments.stripe_customer_id),stripe_subscription_id=COALESCE(excluded.stripe_subscription_id,payments.stripe_subscription_id),amount=excluded.amount,currency=excluded.currency,status=CASE WHEN payments.refunded_amount>=excluded.amount AND payments.refunded_amount>0 THEN 'refunded' WHEN payments.refunded_amount>0 THEN 'partially_refunded' ELSE excluded.status END,paid_at=COALESCE(excluded.paid_at,payments.paid_at),invoice_url=COALESCE(excluded.invoice_url,payments.invoice_url),stripe_event_created=excluded.stripe_event_created,stripe_payment_intent_id=COALESCE(excluded.stripe_payment_intent_id,payments.stripe_payment_intent_id),livemode=excluded.livemode WHERE excluded.stripe_event_created>=payments.stripe_event_created''',
                             (invoice_id,shop_id,obj.get('customer'),stripe_sub,amount,currency,'paid' if paid else 'failed',paid_at,obj.get('hosted_invoice_url'),received,event_created,obj.get('payment_intent'),livemode))
                     if stripe_sub:
-                        new_status='active' if paid else 'past_due'
-                        updated=c.execute("UPDATE subscriptions SET status=CASE WHEN status='canceled' THEN status ELSE ? END,stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?",(new_status,event_created,stripe_sub,event_created))
+                        new_status='active' if paid else 'past_due';failed_at=datetime.fromtimestamp(event_created,timezone.utc).isoformat()
+                        updated=c.execute("UPDATE subscriptions SET status=CASE WHEN status='canceled' THEN status ELSE ? END,payment_failed_at=CASE WHEN status='canceled' THEN payment_failed_at WHEN ?=1 THEN NULL ELSE COALESCE(payment_failed_at,?) END,stripe_event_created=? WHERE stripe_subscription_id=? AND stripe_event_created<=?",(new_status,int(paid),failed_at,event_created,stripe_sub,event_created))
                         if updated.rowcount:
-                            linked=c.execute('SELECT shop_id,plan,current_period_start,paid_until,status FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone()
-                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else None,stripe_sub,linked['status'] if linked else new_status,linked['plan'] if linked else None,linked['current_period_start'] if linked else None,linked['paid_until'] if linked else None)
+                            linked=c.execute('SELECT shop_id,plan,current_period_start,paid_until,status,cancel_at_period_end,cancel_at FROM subscriptions WHERE stripe_subscription_id=?',(stripe_sub,)).fetchone()
+                            record_subscription_event(c,event_id,typ,event_created,linked['shop_id'] if linked else None,stripe_sub,linked['status'] if linked else new_status,linked['plan'] if linked else None,linked['current_period_start'] if linked else None,linked['paid_until'] if linked else None,bool(linked['cancel_at_period_end']) if linked else False,linked['cancel_at'] if linked else None)
                 elif typ=='charge.refunded':
                     charge_id=obj.get('id');invoice_id=obj.get('invoice');payment_intent=obj.get('payment_intent');invoice_id=invoice_id.get('id') if isinstance(invoice_id,dict) else invoice_id;payment_intent=payment_intent.get('id') if isinstance(payment_intent,dict) else payment_intent;currency=str(obj.get('currency','ron')).lower();refund_items=(obj.get('refunds',{}) or {}).get('data',[])
                     for refund in refund_items:
