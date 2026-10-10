@@ -85,7 +85,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
         CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', weekly_breaks TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS staff_time_off(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, kind TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT, label TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS staff_time_off_dates ON staff_time_off(staff_id,start_date,end_date);
         CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
         CREATE INDEX IF NOT EXISTS bookings_staff_time ON bookings(staff_id, starts, ends, status);
         CREATE TABLE IF NOT EXISTS subscriptions(id INTEGER PRIMARY KEY, shop_id INTEGER UNIQUE NOT NULL REFERENCES shops(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'inactive', paid_until TEXT, stripe_customer_id TEXT, stripe_subscription_id TEXT UNIQUE, plan TEXT NOT NULL DEFAULT 'free', stripe_event_created INTEGER NOT NULL DEFAULT 0, current_period_start TEXT, payment_failed_at TEXT, cancel_at_period_end INTEGER NOT NULL DEFAULT 0, cancel_at TEXT);
@@ -118,6 +120,8 @@ def init_db():
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'photo' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
             c.execute("ALTER TABLE staff ADD COLUMN photo TEXT NOT NULL DEFAULT ''")
+        if 'weekly_breaks' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
+            c.execute("ALTER TABLE staff ADD COLUMN weekly_breaks TEXT NOT NULL DEFAULT '{}'")
         if 'plan' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
             c.execute("ALTER TABLE subscriptions ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
         if 'stripe_event_created' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
@@ -297,6 +301,81 @@ def active_subscription(row):
     try:return datetime.fromisoformat(row['paid_until'].replace('Z', '+00:00')) > now_utc()
     except ValueError: return False
 
+def decode_schedule(value):
+    try:
+        parsed=json.loads(value or '{}') if isinstance(value,str) else value
+        return parsed if isinstance(parsed,dict) else {}
+    except (TypeError,ValueError):return {}
+
+def schedule_window(schedule, day):
+    entry=decode_schedule(schedule).get(str(day.weekday()))
+    if isinstance(entry,dict):start,end=entry.get('start'),entry.get('end')
+    elif isinstance(entry,list) and len(entry)>=2:start,end=entry[0],entry[1]
+    else:return None
+    try:
+        start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
+        if start>=end:return None
+        return start,end
+    except (TypeError,ValueError):return None
+
+def validate_weekly_schedule(value):
+    if not isinstance(value,dict):raise ValueError('Verifică programul de lucru.')
+    normalized={}
+    for day_key,entry in value.items():
+        if str(day_key) not in {str(i) for i in range(7)}:raise ValueError('Programul conține o zi invalidă.')
+        if isinstance(entry,dict):start,end=entry.get('start'),entry.get('end')
+        elif isinstance(entry,list) and len(entry)==2:start,end=entry
+        else:raise ValueError('Completează orele de început și de sfârșit pentru fiecare zi lucrătoare.')
+        try:start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
+        except (TypeError,ValueError):raise ValueError('Introdu ore valide pentru programul de lucru.')
+        if start.tzinfo or end.tzinfo:raise ValueError('Orele se introduc în fusul orar local al frizeriei.')
+        if start>=end:raise ValueError('Ora de sfârșit trebuie să fie după ora de început.')
+        normalized[str(day_key)]=[start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes')]
+    return normalized
+
+def staff_slot_matches(c, staff, day, starts, finish):
+    window=schedule_window(staff['weekly_schedule'],day)
+    if not window or starts.replace(tzinfo=None).time()<window[0] or finish.replace(tzinfo=None).time()>window[1]:return False
+    breaks=decode_schedule(staff['weekly_breaks']).get(str(day.weekday()),[])
+    if isinstance(breaks,dict):breaks=[breaks]
+    for pause in breaks if isinstance(breaks,list) else []:
+        try:
+            pause_start=datetime.combine(day,time.fromisoformat(str(pause['start'])),TZ)
+            pause_end=datetime.combine(day,time.fromisoformat(str(pause['end'])),TZ)
+            if starts<pause_end and finish>pause_start:return False
+        except (KeyError,TypeError,ValueError):continue
+    exceptions=c.execute('SELECT kind,start_date,end_date,start_time,end_time FROM staff_time_off WHERE staff_id=? AND shop_id=? AND start_date<=? AND end_date>=?',(staff['id'],staff['shop_id'],day.isoformat(),day.isoformat())).fetchall()
+    for item in exceptions:
+        if item['kind']!='break' or not item['start_time'] or not item['end_time']:return False
+        try:
+            pause_start=datetime.combine(day,time.fromisoformat(item['start_time']),TZ)
+            pause_end=datetime.combine(day,time.fromisoformat(item['end_time']),TZ)
+            if starts<pause_end and finish>pause_start:return False
+        except ValueError:return False
+    return True
+
+def validate_weekly_breaks(schedule, value):
+    breaks=decode_schedule(value);normalized={}
+    for day_key,entries in breaks.items():
+        if str(day_key) not in {str(i) for i in range(7)}:raise ValueError('Programul conține o zi invalidă.')
+        if isinstance(entries,dict):entries=[entries]
+        if not isinstance(entries,list):raise ValueError('Verifică intervalele de pauză.')
+        day=date(2024,1,1)+timedelta(days=(int(day_key)-date(2024,1,1).weekday())%7)
+        window=schedule_window(schedule,day)
+        if not entries:continue
+        if not window:raise ValueError('Setează mai întâi programul de lucru pentru ziua cu pauză.')
+        checked=[]
+        for entry in entries:
+            if not isinstance(entry,dict):raise ValueError('Verifică intervalele de pauză.')
+            try:start=time.fromisoformat(str(entry['start']));end=time.fromisoformat(str(entry['end']))
+            except (KeyError,TypeError,ValueError):raise ValueError('Introdu ore valide pentru pauză.')
+            if start.tzinfo or end.tzinfo:raise ValueError('Orele pauzei se introduc în fusul orar local al frizeriei.')
+            if start>=end or start<window[0] or end>window[1]:raise ValueError('Pauza trebuie să fie în interiorul programului de lucru.')
+            if any(start<other_end and end>other_start for other_start,other_end in checked):raise ValueError('Pauzele din aceeași zi nu se pot suprapune.')
+            checked.append((start,end))
+        normalized[str(day_key)]=[{'start':start.isoformat(timespec='minutes'),'end':end.isoformat(timespec='minutes')} for start,end in sorted(checked)]
+    return normalized
+
 def shop_public(c, shop):
     owner=c.execute('SELECT status FROM users WHERE id=?',(shop['user_id'],)).fetchone()
     if not owner or owner['status']!='active':return None
@@ -305,11 +384,11 @@ def shop_public(c, shop):
     sub = c.execute('SELECT * FROM subscriptions WHERE shop_id=?', (shop['id'],)).fetchone()
     if not active_subscription(sub) or not shop['listing_enabled']: return None
     svc = c.execute('SELECT id,name,description,duration,price FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
-    team = c.execute('SELECT id,name,role,photo,weekly_schedule FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
+    team = c.execute('SELECT id,name,role,photo,weekly_schedule,weekly_breaks FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
     reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? AND is_visible=1 ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
     rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=? AND is_visible=1',(shop['id'],)).fetchone()
-    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':json.loads(x['weekly_schedule'] or '{}')} for x in team]}
+    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':decode_schedule(x['weekly_schedule']),'weekly_breaks':decode_schedule(x['weekly_breaks'])} for x in team]}
 
 def normalize_ro_mobile(value):
     digits=''.join(ch for ch in value if ch.isdigit())
@@ -625,16 +704,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(service_id,shop['id'])).fetchone()
                     staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(staff_id,shop['id'])).fetchone()
                     if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu este disponibil.'})
-                    schedule=json.loads(staff['weekly_schedule'] or '{}'); hours=schedule.get(str(day.weekday()))
+                    schedule=decode_schedule(staff['weekly_schedule']); hours=schedule_window(schedule,day)
                     slots=[]
-                    if hours and len(hours)==2:
-                        start=datetime.combine(day,time.fromisoformat(hours[0]),TZ); end=datetime.combine(day,time.fromisoformat(hours[1]),TZ)
+                    if hours:
+                        start=datetime.combine(day,hours[0],TZ); end=datetime.combine(day,hours[1],TZ)
                         rows=c.execute("SELECT starts,ends FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff_id,end.isoformat(),start.isoformat())).fetchall()
                         busy=[(datetime.fromisoformat(x['starts']).astimezone(TZ),datetime.fromisoformat(x['ends']).astimezone(TZ)) for x in rows]
                         cursor=start
                         while cursor+timedelta(minutes=service['duration'])<=end:
                             finish=cursor+timedelta(minutes=service['duration'])
-                            if cursor>datetime.now(TZ) and all(finish<=a or cursor>=b for a,b in busy):slots.append(cursor.strftime('%H:%M'))
+                            if cursor>datetime.now(TZ) and all(finish<=a or cursor>=b for a,b in busy) and staff_slot_matches(c,staff,day,cursor,finish):slots.append(cursor.strftime('%H:%M'))
                             cursor+=timedelta(minutes=15)
                     return self.json_response(200,{'slots':slots})
                 return self.json_response(200,{'shop':public})
@@ -664,7 +743,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         for item in bookings:
                             booking=dict(item);phone_key=hashlib.sha256(normalize_ro_mobile(booking.get('phone','')).encode()).hexdigest() if booking.get('phone') else ''
                             booking['client_note']=notes.get(phone_key,'');booking_data.append(booking)
-                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {},'notification_delivery':{'email_configured':email_configured(),'sms_configured':sms_configured()}})
+                    team_data=[]
+                    for person in team:
+                        item=dict(person);item['weekly_schedule']=decode_schedule(item['weekly_schedule']);item['weekly_breaks']=decode_schedule(item.get('weekly_breaks'))
+                        item['time_off']=[dict(x) for x in c.execute('SELECT id,kind,start_date,end_date,start_time,end_time,label FROM staff_time_off WHERE staff_id=? AND shop_id=? AND end_date>=? ORDER BY start_date,start_time',(item['id'],shop['id'],datetime.now(TZ).date().isoformat())).fetchall()]
+                        team_data.append(item)
+                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':team_data,'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {},'notification_delivery':{'email_configured':email_configured(),'sms_configured':sms_configured()}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
@@ -778,15 +862,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         if isinstance(weekly,str):
                             try:weekly=json.loads(weekly)
                             except Exception:weekly={}
+                        weekly=validate_weekly_schedule(weekly)
+                        break_raw=x.get('weekly_breaks')
+                        if break_raw is None and x.get('id'):
+                            previous=c.execute('SELECT weekly_breaks FROM staff WHERE id=? AND shop_id=?',(int(x['id']),sid)).fetchone()
+                            break_raw=previous['weekly_breaks'] if previous else '{}'
+                        weekly_breaks=validate_weekly_breaks(weekly,break_raw or {})
                         photo=str(x.get('photo','') or '')
                         if photo and not re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',photo):return self.json_response(400,{'error':'Verifică fotografia frizerului.'})
-                        vals=(x['name'],x.get('role','Frizer'),json.dumps(weekly),int(bool(x.get('active',1))),photo)
+                        vals=(x['name'],x.get('role','Frizer'),json.dumps(weekly),json.dumps(weekly_breaks),int(bool(x.get('active',1))),photo)
                         if x.get('id'):
-                            c.execute('UPDATE staff SET name=?,role=?,weekly_schedule=?,active=?,photo=? WHERE id=? AND shop_id=?',(*vals,int(x['id']),sid));ids.append(int(x['id']))
+                            c.execute('UPDATE staff SET name=?,role=?,weekly_schedule=?,weekly_breaks=?,active=?,photo=? WHERE id=? AND shop_id=?',(*vals,int(x['id']),sid));ids.append(int(x['id']))
                         else:
-                            cur=c.execute('INSERT INTO staff(shop_id,name,role,weekly_schedule,active,photo) VALUES(?,?,?,?,?,?)',(sid,*vals));ids.append(cur.lastrowid)
+                            cur=c.execute('INSERT INTO staff(shop_id,name,role,weekly_schedule,weekly_breaks,active,photo) VALUES(?,?,?,?,?,?,?)',(sid,*vals));ids.append(cur.lastrowid)
                     if ids:c.execute('UPDATE staff SET active=0 WHERE shop_id=? AND id NOT IN ('+','.join('?' for _ in ids)+')',(sid,*ids))
                     else:c.execute('UPDATE staff SET active=0 WHERE shop_id=?',(sid,))
+                elif path=='/api/manage/time-off':
+                    staff_id=int(data.get('staff_id',0));staff=c.execute('SELECT id FROM staff WHERE id=? AND shop_id=?',(staff_id,sid)).fetchone()
+                    if not staff:return self.json_response(404,{'error':'Frizerul nu a fost găsit în echipa ta.'})
+                    if data.get('action')=='delete':
+                        changed=c.execute('DELETE FROM staff_time_off WHERE id=? AND staff_id=? AND shop_id=?',(int(data.get('id',0)),staff_id,sid)).rowcount
+                        if not changed:return self.json_response(404,{'error':'Indisponibilitatea nu a fost găsită.'})
+                    else:
+                        kind=str(data.get('kind',''))
+                        try:start_date=date.fromisoformat(str(data.get('start_date','')));end_date=date.fromisoformat(str(data.get('end_date','')))
+                        except ValueError:return self.json_response(400,{'error':'Alege data de început și de sfârșit.'})
+                        label=str(data.get('label','')).strip()[:120]
+                        if kind not in ('day_off','vacation','break'):return self.json_response(400,{'error':'Alege zi liberă, concediu sau pauză punctuală.'})
+                        if start_date<datetime.now(TZ).date() or end_date<start_date or (end_date-start_date).days>365:return self.json_response(400,{'error':'Alege un interval viitor de maximum un an.'})
+                        start_time=data.get('start_time') or None;end_time=data.get('end_time') or None
+                        if kind=='day_off' and start_date!=end_date:return self.json_response(400,{'error':'Ziua liberă se setează pentru o singură zi; folosește concediu pentru un interval.'})
+                        if kind=='break':
+                            if start_date!=end_date or not start_time or not end_time:return self.json_response(400,{'error':'Pauza punctuală trebuie să aibă o singură zi și ambele ore.'})
+                            try:start_clock=time.fromisoformat(str(start_time));end_clock=time.fromisoformat(str(end_time))
+                            except ValueError:return self.json_response(400,{'error':'Introdu ore valide pentru pauză.'})
+                            if start_clock.tzinfo or end_clock.tzinfo:return self.json_response(400,{'error':'Orele pauzei se introduc în fusul orar local al frizeriei.'})
+                            if start_clock>=end_clock:return self.json_response(400,{'error':'Ora de sfârșit a pauzei trebuie să fie după ora de început.'})
+                            start_time=start_clock.isoformat(timespec='minutes');end_time=end_clock.isoformat(timespec='minutes')
+                        else:start_time=end_time=None
+                        cur=c.execute('INSERT INTO staff_time_off(shop_id,staff_id,kind,start_date,end_date,start_time,end_time,label,created) VALUES(?,?,?,?,?,?,?,?,?)',(sid,staff_id,kind,start_date.isoformat(),end_date.isoformat(),start_time,end_time,label,iso_now()))
+                        return self.json_response(201,{'ok':True,'id':cur.lastrowid})
                 elif path=='/api/manage/notifications':
                     sub=c.execute('SELECT * FROM subscriptions WHERE shop_id=?',(sid,)).fetchone()
                     if not active_subscription(sub):return self.json_response(403,{'error':'Notificările sunt incluse în planurile PRO și BUSINESS. Activează un abonament pentru a le configura.'})
@@ -1123,9 +1238,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not shop or shop['owner_status']!='active' or shop['approval_status']!='approved' or not shop['listing_enabled'] or not active_subscription(sub):return self.json_response(403,{'error':'Frizeria nu acceptă programări momentan.'})
             service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(int(d.get('service_id',0)),shop['id'])).fetchone(); staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(int(d.get('staff_id',0)),shop['id'])).fetchone()
             if not service or not staff:raise ValueError('Serviciul sau frizerul nu este disponibil.')
-            sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()))
             finish=starts+timedelta(minutes=service['duration'])
-            if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):raise ValueError('Ora aleasă este în afara programului frizerului.')
+            if not staff_slot_matches(c,staff,day,starts,finish):raise ValueError('Ora aleasă este în afara programului sau se suprapune cu o pauză ori o zi indisponibilă.')
             collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:raise ValueError('Ora tocmai a fost rezervată. Alege alt interval.')
             promo_code=str(d.get('promo_code','')).strip().upper();discount_amount=0
@@ -1183,8 +1297,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(service_id,row['shop_id'])).fetchone()
             staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(staff_id,row['shop_id'])).fetchone()
             if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu mai este disponibil.'})
-            sched=json.loads(staff['weekly_schedule'] or '{}').get(str(day.weekday()));finish=starts+timedelta(minutes=service['duration'])
-            if not sched or starts.time()<time.fromisoformat(sched[0]) or finish.time()>time.fromisoformat(sched[1]):return self.json_response(400,{'error':'Ora aleasă este în afara programului frizerului.'})
+            finish=starts+timedelta(minutes=service['duration'])
+            if not staff_slot_matches(c,staff,day,starts,finish):return self.json_response(400,{'error':'Ora aleasă este în afara programului sau se suprapune cu o pauză ori o zi indisponibilă.'})
             collision=c.execute("SELECT 1 FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND id<>? AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff['id'],row['id'],finish.isoformat(),starts.isoformat())).fetchone()
             if collision:return self.json_response(409,{'error':'Ora tocmai a fost rezervată. Alege alt interval.'})
             reminder_at=starts-timedelta(hours=24);reminder_sent=0

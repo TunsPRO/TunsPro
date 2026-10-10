@@ -57,3 +57,70 @@ app.addEventListener('change',e=>{if(['filter-city','filter-service','sort-resul
 function appointmentPage(){const upcoming=dash.bookings.filter(b=>new Date(b.starts)>=new Date()).sort((a,b)=>new Date(a.starts)-new Date(b.starts));const barbers=dash.team.filter(t=>t.active);const groups=barbers.map(t=>({id:t.id,name:t.name,bookings:upcoming.filter(b=>Number(b.staff_id)===Number(t.id))}));const knownIds=new Set(barbers.map(t=>Number(t.id)));upcoming.forEach(b=>{if(!knownIds.has(Number(b.staff_id))){let group=groups.find(g=>g.id===b.staff_id);if(!group){group={id:b.staff_id,name:b.staff_name,bookings:[]};groups.push(group)}group.bookings.push(b)}});const barberSections=groups.map(g=>`<section class="panel barber-agenda"><div class="panel-head barber-agenda-head"><div><h2>${esc(g.name)}</h2><small>${g.bookings.length} ${g.bookings.length===1?'programare viitoare':'programări viitoare'}</small></div><span class="pill">FRIZER</span></div>${g.bookings.length?`<div class="barber-appointments">${g.bookings.map(b=>`<article class="barber-appointment"><div class="barber-appointment-when"><strong>${new Date(b.starts).toLocaleTimeString('ro-RO',{hour:'2-digit',minute:'2-digit'})}</strong><span>${new Date(b.starts).toLocaleDateString('ro-RO',{weekday:'short',day:'2-digit',month:'short'})}</span></div><div class="barber-appointment-client"><strong>${esc(b.client)}</strong><small>${esc(b.phone)}${b.email?` · ${esc(b.email)}`:''}</small></div><div class="barber-appointment-service"><strong>${esc(b.service_name)}</strong><small>${b.price} lei · ${b.duration} min</small></div><button class="filter-btn" data-cancel="${b.id}">Anulează</button></article>`).join('')}</div>`:'<p class="barber-agenda-empty">Nu are programări viitoare.</p>'}</section>`).join('');return dashboardShell(`<div class="dash-top"><div><h1>Calendar</h1><p>Programările viitoare pentru ${esc(dash.shop.name)}, organizate pe frizer.</p></div><a class="page-link" href="#cauta">↗ Vezi căutarea publică</a></div><section class="stat-grid"><article class="stat"><div class="stat-top">Programări viitoare</div><strong>${upcoming.length}</strong><small>Rezervări confirmate</small></article><article class="stat"><div class="stat-top">Servicii active</div><strong>${dash.services.filter(s=>s.active).length}</strong><small>Vizibile clienților</small></article><article class="stat"><div class="stat-top">Echipă</div><strong>${barbers.length}</strong><small>Frizeri activi</small></article><article class="stat"><div class="stat-top">Abonament</div><strong style="font-size:20px">${dash.subscription.active?'Activ':'Inactiv'}</strong><small>${dash.subscription.active?'Până la '+fmtDate(dash.subscription.paid_until):'49 lei / lună'}</small></article></section><div class="barber-agendas-head"><h2>Agenda echipei</h2><a href="#dashboard-clients">Vezi clienții →</a></div>${barberSections||'<section class="panel">Adaugă un frizer în echipă pentru a organiza programările.</section>'}`,'dashboard')}
 
 app.addEventListener('click',e=>{const link=e.target.closest('[data-profile-scroll]');if(!link)return;document.getElementById(link.dataset.profileScroll)?.scrollIntoView({behavior:'smooth',block:'start'})});
+
+window.hoursPage=function(){
+  const active=dash.team.filter(t=>t.active),days=weekdays||['Luni','Marți','Miercuri','Joi','Vineri','Sâmbătă','Duminică'];
+  const kindLabel={day_off:'Zi liberă',vacation:'Concediu',break:'Pauză punctuală'};
+  const dateLabel=value=>new Date(`${value}T12:00:00`).toLocaleDateString('ro-RO',{day:'2-digit',month:'long',year:'numeric'});
+  const panels=active.map(t=>{
+    const schedule=t.weekly_schedule||{},breaks=t.weekly_breaks||{},timeOff=t.time_off||[];
+    const rows=days.map((day,i)=>{
+      const hours=schedule[String(i)]||[],start=Array.isArray(hours)?hours[0]:(hours.start||''),end=Array.isArray(hours)?hours[1]:(hours.end||''),pause=(breaks[String(i)]||[])[0]||{};
+      const isOpen=!!(start&&end),disabled=isOpen?'':'disabled';
+      return `<div class="schedule-edit-row schedule-edit-day"><label><input type="checkbox" name="open-${i}" ${isOpen?'checked':''}> ${esc(day)}</label><input type="time" class="input" name="start-${i}" value="${esc(start||'09:00')}" ${disabled}><span>—</span><input type="time" class="input" name="end-${i}" value="${esc(end||'18:00')}" ${disabled}><span class="schedule-break-label">Pauză</span><input type="time" class="input" name="break-start-${i}" value="${esc(pause.start||'')}" ${disabled}><span>—</span><input type="time" class="input" name="break-end-${i}" value="${esc(pause.end||'')}" ${disabled}></div>`
+    }).join('');
+    const exceptions=timeOff.map(x=>`<article class="time-off-row"><div><strong>${esc(kindLabel[x.kind]||'Indisponibil')}</strong><small>${dateLabel(x.start_date)}${x.end_date!==x.start_date?` – ${dateLabel(x.end_date)}`:''}${x.start_time&&x.end_time?` · ${esc(x.start_time)}–${esc(x.end_time)}`:''}${x.label?` · ${esc(x.label)}`:''}</small></div><button type="button" class="filter-btn" data-delete-time-off="${x.id}" data-staff="${t.id}">Șterge</button></article>`).join('');
+    return `<section class="panel schedule-panel"><form class="schedule-form" data-staff="${t.id}"><h2>${esc(t.name)}</h2><p class="manage-note">Orele și pauzele recurente se aplică în fiecare săptămână. O pauză poate fi lăsată necompletată.</p><div class="schedule-edit-grid">${rows}</div><button class="btn">Salvează programul</button></form><div class="time-off-section"><div class="panel-head"><div><h3>Zile libere, concedii și pauze punctuale</h3><p>Aceste intervale exclud automat orele din rezervările noi.</p></div></div><div class="time-off-list">${exceptions||'<p class="manage-note">Nu sunt zile libere sau concedii viitoare.</p>'}</div><form class="time-off-form" data-staff="${t.id}"><label class="field-label">Tip<select class="input" name="kind" data-time-off-kind><option value="day_off">Zi liberă</option><option value="vacation">Concediu</option><option value="break">Pauză punctuală într-o anumită zi</option></select></label><label class="field-label">Data de început<input class="input" type="date" name="start_date" min="${new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Bucharest'}).format(new Date())}" required></label><label class="field-label">Data de sfârșit<input class="input" type="date" name="end_date" min="${new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Bucharest'}).format(new Date())}" required disabled></label><label class="field-label time-off-time">Ora de început<input class="input" type="time" name="start_time" disabled></label><label class="field-label time-off-time">Ora de sfârșit<input class="input" type="time" name="end_time" disabled></label><label class="field-label">Notă (opțional)<input class="input" name="label" maxlength="120" placeholder="ex. Concediu de vară"></label><button class="btn">Adaugă indisponibilitate</button></form></div></section>`
+  }).join('');
+  return dashboardShell(`<div class="dash-top"><div><h1>Programul echipei</h1><p>Configurează orele fiecărui frizer, pauzele recurente, zilele libere și concediile. Intervalele indisponibile nu apar clienților.</p></div></div><div class="manage-list">${panels||'<div class="panel">Adaugă frizeri în echipă mai întâi.</div>'}</div>`, 'dashboard-hours')
+};
+
+app.addEventListener('submit',async e=>{
+  const form=e.target;
+  if(!form.matches('.schedule-form,.time-off-form'))return;
+  e.preventDefault();e.stopImmediatePropagation();
+  const data=parseForm(form),staffId=Number(form.dataset.staff);
+  try{
+    if(form.matches('.schedule-form')){
+      const schedule={},breaks={};
+      for(let i=0;i<7;i++){
+        if(data[`open-${i}`]){
+          const start=data[`start-${i}`],end=data[`end-${i}`];
+          if(!start||!end||start>=end)throw new Error(`Introdu un interval valid pentru ${weekdays[i].toLocaleLowerCase('ro')}.`);
+          schedule[String(i)]=[start,end];
+        }
+        const pauseStart=data[`break-start-${i}`],pauseEnd=data[`break-end-${i}`];
+        if(data[`open-${i}`]&&(pauseStart||pauseEnd)){if(!pauseStart||!pauseEnd)throw new Error(`Completează ambele ore ale pauzei pentru ${weekdays[i].toLocaleLowerCase('ro')}.`);breaks[String(i)]=[{start:pauseStart,end:pauseEnd}]}
+      }
+      const team=dash.team.map(t=>Number(t.id)===staffId?{...t,weekly_schedule:schedule,weekly_breaks:breaks}:t);
+      await api('/api/manage/team',{method:'PUT',body:JSON.stringify({team})});
+      toast('Programul și pauzele au fost salvate.');location.hash='dashboard';return;
+    }
+    if(data.kind==='day_off')data.end_date=data.start_date;
+    if(data.kind==='break'&&data.start_date!==data.end_date)throw new Error('Pauza punctuală trebuie să fie într-o singură zi.');
+    await api('/api/manage/time-off',{method:'PUT',body:JSON.stringify({...data,staff_id:staffId})});
+    toast('Indisponibilitatea a fost salvată; acele ore nu vor mai putea fi rezervate.');location.hash='dashboard';
+  }catch(err){toast(err.message,'error')}
+},true);
+
+app.addEventListener('click',async e=>{
+  const button=e.target.closest('[data-delete-time-off]');if(!button)return;
+  if(!confirm('Ștergi această indisponibilitate? Orele vor putea apărea din nou pentru rezervare.'))return;
+  button.disabled=true;
+  try{await api('/api/manage/time-off',{method:'PUT',body:JSON.stringify({action:'delete',id:Number(button.dataset.deleteTimeOff),staff_id:Number(button.dataset.staff)})});toast('Indisponibilitatea a fost ștearsă.');location.hash='dashboard'}catch(err){button.disabled=false;toast(err.message,'error')}
+});
+
+app.addEventListener('change',e=>{
+  if(e.target.matches('.schedule-form input[type="checkbox"][name^="open-"]')){
+    const row=e.target.closest('.schedule-edit-row'),enabled=e.target.checked;
+    row.querySelectorAll('input[type="time"]').forEach(input=>input.disabled=!enabled);
+    return;
+  }
+  const form=e.target.closest('.time-off-form');if(!form)return;
+  const kind=form.elements.kind.value,start=form.elements.start_date,end=form.elements.end_date,isBreak=kind==='break';
+  if(e.target.matches('[data-time-off-kind]')){
+    form.querySelectorAll('.time-off-time input').forEach(input=>{input.required=isBreak;input.disabled=!isBreak;if(!isBreak)input.value=''});
+    end.disabled=kind==='day_off';end.required=kind!=='day_off';end.min=start.value||end.min;if(kind==='day_off'||(kind==='break'&&start.value))end.value=start.value;
+  }
+  if(e.target===start){end.min=start.value||end.min;if(kind==='day_off'||kind==='break')end.value=start.value;else if(end.value&&end.value<start.value)end.value=''}
+});
