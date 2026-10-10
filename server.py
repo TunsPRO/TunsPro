@@ -113,7 +113,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
-        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_email_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_sms_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'photo' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
@@ -163,6 +163,9 @@ def init_db():
                 c.execute('DELETE FROM admin_sessions WHERE admin_id=?',(existing['id'],))
                 c.execute('UPDATE admins SET password=? WHERE id=?',(password_hash(admin_password),existing['id']))
     anonymize_old_bookings()
+    with connect() as c:
+        # Preserve reminders already delivered by older versions.
+        c.execute('UPDATE bookings SET reminder_email_sent=1,reminder_sms_sent=1 WHERE reminder_sent=1')
 
 def anonymize_old_bookings():
     cutoff=(now_utc()-timedelta(days=365)).isoformat()
@@ -187,15 +190,21 @@ def send_due_reminders():
     for row in rows:
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         body=f'Reamintire TunsPro: ai programare la {row["shop_name"]} pe {when}, pentru {row["service_name"]} cu {row["staff_name"]}. Adresă: {row["address"]}, {row["city"]}.'
-        attempted=False
-        if row['notification_email'] and row['email'] and email_configured():
-            try:send_email(row['email'],f'Reamintire programare — {row["shop_name"]}',body);attempted=True
-            except Exception as e:print('Email reminder failed:',repr(e))
-        if row['notification_sms'] and row['phone'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(row['phone'],body);attempted=True
-            except Exception as e:print('SMS reminder failed:',repr(e))
-        if attempted:
-            with connect() as c:c.execute('UPDATE bookings SET reminder_sent=1 WHERE id=? AND reminder_sent=0',(row['id'],))
+        email_done=not bool(row['notification_email']) or bool(row['reminder_email_sent'])
+        sms_done=not bool(row['notification_sms']) or bool(row['reminder_sms_sent'])
+        if row['notification_email'] and not row['reminder_email_sent']:
+            if not row['email'] or not email_configured():
+                email_done=not bool(row['email'])
+            else:
+                try:send_email(row['email'],f'Reamintire programare — {row["shop_name"]}',body);email_done=True
+                except Exception as e:print('Email reminder failed:',repr(e))
+        if row['notification_sms'] and not row['reminder_sms_sent']:
+            if sms_configured() and row['phone']:
+                try:sms_notice(row['phone'],body);sms_done=True
+                except Exception as e:print('SMS reminder failed:',repr(e))
+        if email_done or sms_done:
+            with connect() as c:
+                c.execute('UPDATE bookings SET reminder_email_sent=?,reminder_sms_sent=?,reminder_sent=? WHERE id=? AND reminder_sent=0',(int(email_done),int(sms_done),int(email_done and sms_done),row['id']))
 
 def reminder_loop():
     while True:
@@ -318,6 +327,21 @@ def email_configured():
 
 def email_provider():
     return 'Resend' if os.environ.get('RESEND_API_KEY','').strip() else 'SMTP'
+
+def sms_configured():
+    return all(os.environ.get(key,'').strip() for key in ('TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_FROM'))
+
+def notify_email(recipient, subject, body):
+    if not recipient:return 'unavailable'
+    if not email_configured():return 'not_configured'
+    try:send_email(recipient,subject,body);return 'sent'
+    except Exception as e:print('Email notification failed:',repr(e));return 'failed'
+
+def notify_sms(recipient, body):
+    if not recipient:return 'unavailable'
+    if not sms_configured():return 'not_configured'
+    try:sms_notice(recipient,body);return 'sent'
+    except Exception as e:print('SMS notification failed:',repr(e));return 'failed'
 
 def send_email(to_email, subject, body):
     if not to_email: raise ValueError('Missing email recipient')
@@ -640,7 +664,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         for item in bookings:
                             booking=dict(item);phone_key=hashlib.sha256(normalize_ro_mobile(booking.get('phone','')).encode()).hexdigest() if booking.get('phone') else ''
                             booking['client_note']=notes.get(phone_key,'');booking_data.append(booking)
-                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {}})
+                    return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':[dict(x) for x in team],'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {},'notification_delivery':{'email_configured':email_configured(),'sms_configured':sms_configured()}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
         if path not in ('/','/index.html','/client.js','/features.js','/styles.css'):return self.send_error(404)
         return super().do_GET()
@@ -1126,24 +1150,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         when=f'{days_ro[day.weekday()]} {day.day} {months_ro[day.month-1]}, {starts:%H:%M}'
         manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+cancel_token
         reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+cancel_token
-        mail_status='unavailable';sms_status='unavailable'
-        if email_configured():
-            try:
-                send_email(client_email,f'Cerere de programare primită — {shop["name"]}',f'Am primit cererea ta pentru {service["name"]} cu {staff["name"]}, {when}. Programarea așteaptă confirmarea frizeriei. Adresă: {shop["address"]}, {shop["city"]}. Dacă nu mai dorești rezervarea, o poți anula aici: {manage_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
-                mail_status='sent'
-            except Exception as e:mail_status='failed';print('Client confirmation failed:',repr(e))
-        if os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:
-                sms_notice(client_phone,f'TunsPro: cererea ta la {shop["name"]} pentru {when} a fost primita si asteapta confirmarea frizeriei. Anulare: {manage_url}.')
-                sms_status='sent'
-            except Exception as e:sms_status='failed';print('Client SMS confirmation failed:',repr(e))
-        if opts and opts['notification_email'] and owner and email_configured():
-            try:send_email(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a trimis o cerere pentru {service["name"]} cu {staff["name"]}, {when}. Așteaptă confirmarea ta. Telefon: {client_phone}')
-            except Exception as e:print('Barber email notification failed:',repr(e))
-        if opts and opts['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}')
-            except Exception as e:print('Barber SMS notification failed:',repr(e))
-        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'price':service['price']-discount_amount,'discount':discount_amount,'promo_code':promo_code or None,'notifications':{'email':mail_status,'sms':sms_status},'status':'pending','message':'Cererea de programare a fost trimisă și așteaptă confirmarea frizeriei.'})
+        mail_status=notify_email(client_email,f'Cerere de programare primită — {shop["name"]}',f'Am primit cererea ta pentru {service["name"]} cu {staff["name"]}, {when}. Programarea așteaptă confirmarea frizeriei. Adresă: {shop["address"]}, {shop["city"]}. Dacă nu mai dorești rezervarea, o poți anula aici: {manage_url}. Pentru ajutor, contactează frizeria la {shop["phone"]}.')
+        sms_status=notify_sms(client_phone,f'TunsPro: cererea ta la {shop["name"]} pentru {when} a fost primita si asteapta confirmarea frizeriei. Anulare: {manage_url}.')
+        shop_mail_status=notify_email(owner['email'],f'Programare nouă — {shop["name"]}',f'{client_name} a trimis o cerere pentru {service["name"]} cu {staff["name"]}, {when}. Așteaptă confirmarea ta. Telefon: {client_phone}') if opts and opts['notification_email'] and owner else 'disabled'
+        shop_sms_status=notify_sms(shop['phone'],f'TunsPro: programare nouă la {when}. Client: {client_name}, {client_phone}') if opts and opts['notification_sms'] else 'disabled'
+        return self.json_response(201,{'ok':True,'booking_id':booking_id,'phone':client_phone,'cancel_token':cancel_token,'price':service['price']-discount_amount,'discount':discount_amount,'promo_code':promo_code or None,'notifications':{'email':mail_status,'sms':sms_status},'shop_notifications':{'email':shop_mail_status,'sms':shop_sms_status},'status':'pending','message':'Cererea de programare a fost înregistrată și așteaptă confirmarea frizeriei. Statusul e-mailului și SMS-ului este afișat separat.'})
     def public_reschedule_details(self,d):
         token=str(d.get('token','')).strip()
         if len(token)<30:return self.json_response(400,{'error':'Linkul de modificare nu este valid.'})
@@ -1180,25 +1191,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if reminder_at<=now_utc():
                 if starts>now_utc()+timedelta(hours=1):reminder_at=starts-timedelta(hours=1)
                 else:reminder_sent=1
-            c.execute('UPDATE bookings SET service_id=?,staff_id=?,starts=?,ends=?,price_at_booking=?,reminder_at=?,reminder_sent=? WHERE id=?',(service['id'],staff['id'],starts.isoformat(),finish.isoformat(),service['price'],reminder_at.isoformat() if not reminder_sent else None,reminder_sent,row['id']))
+            c.execute('UPDATE bookings SET service_id=?,staff_id=?,starts=?,ends=?,price_at_booking=?,reminder_at=?,reminder_sent=?,reminder_email_sent=?,reminder_sms_sent=? WHERE id=?',(service['id'],staff['id'],starts.isoformat(),finish.isoformat(),service['price'],reminder_at.isoformat() if not reminder_sent else None,reminder_sent,reminder_sent,reminder_sent,row['id']))
             record_booking_event(c,row['id'],row['shop_id'],'booking_rescheduled','client',old_starts=row['starts'],new_starts=starts.isoformat(),old_status='confirmed',new_status='confirmed')
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
             client_email=row['email'];client_phone=row['phone'];client=row['client'];shop_name=row['shop_name'];shop_phone=row['shop_phone'];old_starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         when=starts.strftime('%d.%m.%Y, %H:%M');manage_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#anulare/'+token;reschedule_url=os.environ.get('PUBLIC_URL','').rstrip('/')+'/#reprogramare/'+token
-        mail_status='unavailable';sms_status='unavailable'
-        if client_email and email_configured():
-            try:send_email(client_email,f'Programare reprogramată — {shop_name}',f'Programarea ta a fost mutată de la {old_starts} la {when}, pentru {service["name"]} cu {staff["name"]}. Adresă: {row["address"]}, {row["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}.');mail_status='sent'
-            except Exception as e:mail_status='failed';print('Client reschedule email failed:',repr(e))
-        if client_phone and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(client_phone,f'TunsPro: programarea ta la {shop_name} a fost mutată pentru {when}, cu {staff["name"]}. Modificare: {reschedule_url}.');sms_status='sent'
-            except Exception as e:sms_status='failed';print('Client reschedule SMS failed:',repr(e))
-        if settings and settings['notification_email'] and owner and email_configured():
-            try:send_email(owner['email'],f'Programare reprogramată — {shop_name}',f'{client} a reprogramat rezervarea din {old_starts} pentru {when}, cu {staff["name"]}. Telefon: {client_phone}.')
-            except Exception as e:print('Shop reschedule email failed:',repr(e))
-        if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(shop_phone,f'TunsPro: {client} a reprogramat rezervarea pentru {when}, cu {staff["name"]}.')
-            except Exception as e:print('Shop reschedule SMS failed:',repr(e))
-        return self.json_response(200,{'ok':True,'booking_id':row['id'],'cancel_token':token,'notifications':{'email':mail_status,'sms':sms_status}})
+        mail_status=notify_email(client_email,f'Programare reprogramată — {shop_name}',f'Programarea ta a fost mutată de la {old_starts} la {when}, pentru {service["name"]} cu {staff["name"]}. Adresă: {row["address"]}, {row["city"]}. Pentru anulare online: {manage_url}. Pentru schimbarea zilei sau orei: {reschedule_url}.')
+        sms_status=notify_sms(client_phone,f'TunsPro: programarea ta la {shop_name} a fost mutată pentru {when}, cu {staff["name"]}. Modificare: {reschedule_url}.')
+        shop_mail_status=notify_email(owner['email'],f'Programare reprogramată — {shop_name}',f'{client} a reprogramat rezervarea din {old_starts} pentru {when}, cu {staff["name"]}. Telefon: {client_phone}.') if settings and settings['notification_email'] and owner else 'disabled'
+        shop_sms_status=notify_sms(shop_phone,f'TunsPro: {client} a reprogramat rezervarea pentru {when}, cu {staff["name"]}.') if settings and settings['notification_sms'] else 'disabled'
+        return self.json_response(200,{'ok':True,'booking_id':row['id'],'cancel_token':token,'notifications':{'email':mail_status,'sms':sms_status},'shop_notifications':{'email':shop_mail_status,'sms':shop_sms_status}})
     def cancel_public_booking(self,d):
         token=str(d.get('token','')).strip()
         if len(token)<30:return self.json_response(400,{'error':'Linkul de anulare nu este valid.'})
@@ -1212,16 +1214,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             record_booking_event(c,row['id'],row['shop_id'],'booking_cancelled','client',actor_id=row['customer_id'],old_starts=row['starts'],new_starts=row['starts'],old_status=row['status'],new_status='cancelled')
             settings=c.execute('SELECT * FROM settings WHERE shop_id=?',(row['shop_id'],)).fetchone();owner=c.execute('SELECT u.email FROM users u JOIN shops sh ON sh.user_id=u.id WHERE sh.id=?',(row['shop_id'],)).fetchone()
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
-        if row['email'] and email_configured():
-            try:send_email(row['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta din {when} a fost anulată. Dacă te-ai răzgândit, poți face o nouă rezervare pe TunsPro.')
-            except Exception as e:print('Client cancellation confirmation failed:',repr(e))
-        if settings and settings['notification_email'] and owner and email_configured():
-            try:send_email(owner['email'],f'Programare anulată — {row["shop_name"]}',f'{row["client"]} a anulat programarea din {when}.')
-            except Exception as e:print('Barber cancellation notice failed:',repr(e))
-        if settings and settings['notification_sms'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(row['shop_phone'],f'TunsPro: clientul {row["client"]} a anulat programarea din {when}.')
-            except Exception as e:print('Barber cancellation SMS failed:',repr(e))
-        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată.'})
+        client_email_status=notify_email(row['email'],f'Programare anulată — {row["shop_name"]}',f'Programarea ta din {when} a fost anulată. Dacă te-ai răzgândit, poți face o nouă rezervare pe TunsPro.')
+        client_sms_status=notify_sms(row['phone'],f'TunsPro: programarea ta la {row["shop_name"]}, din {when}, a fost anulată.')
+        shop_email_status=notify_email(owner['email'],f'Programare anulată — {row["shop_name"]}',f'{row["client"]} a anulat programarea din {when}.') if settings and settings['notification_email'] and owner else 'disabled'
+        shop_sms_status=notify_sms(row['shop_phone'],f'TunsPro: clientul {row["client"]} a anulat programarea din {when}.') if settings and settings['notification_sms'] else 'disabled'
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată. Statusul notificărilor este afișat separat.','notifications':{'email':client_email_status,'sms':client_sms_status},'shop_notifications':{'email':shop_email_status,'sms':shop_sms_status}})
     def cancel_booking(self,d):
         reason=str(d.get('reason','')).strip()
         if not reason:return self.json_response(400,{'error':'Adaugă motivul anulării.'})
@@ -1240,13 +1237,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             record_booking_event(c,row['id'],user['shop_id'],'booking_cancelled','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status=old_status,new_status='cancelled',reason=reason)
             client_email=row['email'];client_phone=row['phone'];client=row['client'];starts=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M');shop_name=user['shop_name']
         body=f'Programarea ta de la {shop_name}, {starts}, a fost anulată de frizerie. Motiv: {reason}'
-        if client_email and email_configured():
-            try:send_email(client_email,f'Programare anulată — {shop_name}',body)
-            except Exception as e:print('Client cancellation notice failed:',repr(e))
-        if client_phone and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata. Motiv: {reason}')
-            except Exception as e:print('Client cancellation SMS failed:',repr(e))
-        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată.'})
+        email_status=notify_email(client_email,f'Programare anulată — {shop_name}',body)
+        sms_status=notify_sms(client_phone,f'TunsPro: programarea ta de la {shop_name}, {starts}, a fost anulata. Motiv: {reason}')
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost anulată. Statusul notificărilor este afișat separat.','notifications':{'email':email_status,'sms':sms_status}})
     def confirm_booking(self,d):
         with connect() as c:
             user=self.auth(c)
@@ -1261,13 +1254,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             record_booking_event(c,row['id'],user['shop_id'],'booking_confirmed','barber',actor_id=user['id'],old_starts=row['starts'],new_starts=row['starts'],old_status='pending',new_status='confirmed')
         when=datetime.fromisoformat(row['starts']).astimezone(TZ).strftime('%d.%m.%Y, %H:%M')
         body=f'Programarea ta a fost confirmată de frizerie: {row["service_name"]} cu {row["staff_name"]}, {when}. Adresă: {row["address"]}, {row["city"]}. Pentru ajutor, contactează frizeria la {row["shop_phone"]}.'
-        if row['email'] and email_configured():
-            try:send_email(row['email'],f'Programare confirmată — {row["shop_name"]}',body)
-            except Exception as e:print('Client booking confirmation email failed:',repr(e))
-        if row['phone'] and os.environ.get('TWILIO_ACCOUNT_SID') and os.environ.get('TWILIO_AUTH_TOKEN') and os.environ.get('TWILIO_FROM'):
-            try:sms_notice(row['phone'],f'TunsPro: programarea ta la {row["shop_name"]} a fost confirmată pentru {when}, cu {row["staff_name"]}.')
-            except Exception as e:print('Client booking confirmation SMS failed:',repr(e))
-        return self.json_response(200,{'ok':True,'message':'Programarea a fost confirmată.'})
+        email_status=notify_email(row['email'],f'Programare confirmată — {row["shop_name"]}',body)
+        sms_status=notify_sms(row['phone'],f'TunsPro: programarea ta la {row["shop_name"]} a fost confirmată pentru {when}, cu {row["staff_name"]}.')
+        return self.json_response(200,{'ok':True,'message':'Programarea a fost confirmată. Statusul notificărilor este afișat separat.','notifications':{'email':email_status,'sms':sms_status}})
     def save_client_note(self,d):
         phone=d.get('phone')
         if not isinstance(phone,str) or not (normalized:=normalize_ro_mobile(phone)):
