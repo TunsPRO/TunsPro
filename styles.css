@@ -249,3 +249,42 @@
   .booking-profile-page .profile-tabs button{font-size:11px}
 }
 @media(prefers-reduced-motion:reduce){.booking-service,.booking-barber,.booking-time-grid .slot{transition:none}}
+
+/* Clear date and availability picker for public booking */
+.booking-date-picker{margin-top:15px;padding:15px;border:1px solid var(--line);border-radius:13px;background:#fbfcf8}
+.booking-date-heading{display:flex;align-items:center;gap:11px;margin-bottom:14px}
+.booking-date-icon{display:grid;place-items:center;width:40px;height:40px;flex:0 0 40px;border-radius:12px;background:#eef3dc;color:#718340}
+.booking-date-icon svg{width:21px;height:21px;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.booking-date-heading>span:last-child{display:grid;gap:3px}
+.booking-date-heading strong{font-size:14px}
+.booking-date-heading small{color:var(--muted);font-size:11px}
+.booking-date-options{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px}
+.booking-date-option{min-width:0;min-height:75px;display:grid;align-content:center;justify-items:center;gap:2px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);transition:background .16s,border-color .16s,box-shadow .16s}
+.booking-date-option span{font-size:10px;color:var(--muted);text-transform:capitalize}
+.booking-date-option strong{font:750 19px Manrope;line-height:1.15}
+.booking-date-option small{font-size:10px;color:var(--muted);text-transform:capitalize}
+.booking-date-option:hover{border-color:#a8b77c;background:#f8faef}
+.booking-date-option.selected{border-color:#91a34e;background:var(--lime);box-shadow:0 0 0 2px #d7f16b55}
+.booking-date-option.selected span,.booking-date-option.selected small{color:#46552b}
+.booking-date-option:focus-visible,.booking-time-grid .slot:focus-visible{outline:3px solid #9db360;outline-offset:2px}
+.booking-date-label{max-width:100%;margin:14px 0 0}
+.booking-date-label>span{font-size:11px;color:var(--muted)}
+.booking-date-label .input{margin-top:6px;background:#fff}
+.booking-availability-note{margin:15px 0 8px;color:var(--muted);font-size:12px}
+.booking-time-grid{display:grid}
+.booking-slots-heading{grid-column:1/-1;display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:3px}
+.booking-slots-heading strong{font:750 15px Manrope}
+.booking-slots-heading span{font-size:11px;color:var(--muted);text-transform:capitalize}
+.booking-slots-empty,.booking-slots-loading{grid-column:1/-1;display:grid;justify-items:start;gap:5px;padding:14px 0;color:var(--muted);font-size:12px}
+.booking-slots-empty>span{display:grid;place-items:center;width:34px;height:34px;margin-bottom:2px;border-radius:10px;background:#f0f3e6;color:#718340;font-size:20px}
+.booking-slots-empty strong{color:var(--ink);font-size:13px}
+.booking-slots-empty small{font-size:11px}
+@media(max-width:680px){
+  .booking-date-picker{padding:12px}
+  .booking-date-options{display:flex;gap:7px;overflow-x:auto;padding:1px 1px 7px;scroll-snap-type:x mandatory;scrollbar-width:thin}
+  .booking-date-option{flex:0 0 58px;min-height:69px;scroll-snap-align:start}
+  .booking-date-option strong{font-size:17px}
+  .booking-slots-heading strong{font-size:14px}
+  .booking-slots-heading span{font-size:10px}
+}
+@media(prefers-reduced-motion:reduce){.booking-date-option{transition:none}}
