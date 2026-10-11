@@ -410,3 +410,6 @@
 .directory-filters .input:disabled{background:#f7f8f5;color:#90958a;cursor:not-allowed}
 .directory-location-source{max-width:760px;margin:8px 0 0;color:var(--muted);font-size:10px;line-height:1.5}
 @media(max-width:680px){.directory-filters{grid-template-columns:1fr 1fr}.directory-filters label:nth-child(3){grid-column:1/-1}.directory-filters label small{font-size:9px}.directory-location-source{font-size:9px}}
+
+.home-search-form .input:disabled{background:#f4f5f0;color:#92958c;cursor:not-allowed}
+.home-search-form label{min-width:0}
