@@ -403,3 +403,10 @@
   .directory-filters .input{min-height:42px;padding:0 8px;font-size:11px}
   .directory-results{max-width:none}
 }
+
+/* Căutare pe județ și localitate. */
+.directory-filters{grid-template-columns:repeat(3,minmax(0,1fr))}
+.directory-filters label small{color:var(--muted);font-size:10px;line-height:1.4}
+.directory-filters .input:disabled{background:#f7f8f5;color:#90958a;cursor:not-allowed}
+.directory-location-source{max-width:760px;margin:8px 0 0;color:var(--muted);font-size:10px;line-height:1.5}
+@media(max-width:680px){.directory-filters{grid-template-columns:1fr 1fr}.directory-filters label:nth-child(3){grid-column:1/-1}.directory-filters label small{font-size:9px}.directory-location-source{font-size:9px}}
