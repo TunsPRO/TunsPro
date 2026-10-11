@@ -288,3 +288,15 @@
   .booking-slots-heading span{font-size:10px}
 }
 @media(prefers-reduced-motion:reduce){.booking-date-option{transition:none}}
+
+/* Reuse the TunsPro logo in the admin, shop dashboard, and public footer */
+.admin-sidebar .brand{height:62px;flex:0 0 62px;margin:0 7px 22px;color:#fff}
+.admin-sidebar .brand-symbol{width:44px;height:44px}
+.admin-sidebar .brand-word{font-size:21px}
+.admin-sidebar .brand-word small{font-size:6px;letter-spacing:1.7px}
+.sidebar .brand-tuns,.footer .brand-tuns{color:var(--ink)}
+.footer .brand{margin:0 0 8px}
+.footer .brand-symbol{width:40px;height:40px}
+.footer .brand-word{font-size:19px}
+.footer .brand-word small{font-size:5px;letter-spacing:1.7px}
+.sidebar .brand-symbol,.footer .brand-symbol{background:#10110f;border-radius:12px}
