@@ -609,6 +609,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             services=', '.join(x['name'] for x in public['services'][:4])
             description=f"Programează-te online la {public['name']} din {public['city']}. Vezi serviciile și prețurile{(': '+services) if services else ''} și alege o oră disponibilă."
             canonical=f"https://tunspro.ro/frizerie/{urllib.parse.quote(slug,safe='')}"
+            def public_image_url(value):
+                if not isinstance(value,str):return ''
+                if value.startswith('https://'):return value
+                if re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',value):return 'https://tunspro.ro'+value
+                return ''
             page=(ROOT/'index.html').read_text(encoding='utf-8')
             page=page.replace('<link rel="canonical" href="https://tunspro.ro/">',f'<link rel="canonical" href="{html_escape(canonical,quote=True)}">',1)
             page=page.replace('<meta name="description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online la TunsPro. Găsește barberul potrivit fără să-ți creezi cont.">',f'<meta name="description" content="{html_escape(description,quote=True)}">',1)
@@ -619,18 +624,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             page=page.replace('<meta name="twitter:description" content="Descoperă frizerii și rezervă online fără cont de client.">',f'<meta name="twitter:description" content="{html_escape(description,quote=True)}">',1)
             page=page.replace('<title>TunsPro — Programări fără telefoane</title>',f'<title>{html_escape(title)}</title>',1)
             schema={'@context':'https://schema.org','@type':'HairSalon','name':public['name'],'url':canonical,'description':description,'telephone':public['phone'],'address':{'@type':'PostalAddress','streetAddress':public['address'],'addressLocality':public['city'],'addressCountry':'RO'},'inLanguage':'ro-RO'}
-            if public.get('photos'):
-                photo=public['photos'][0]
-                if isinstance(photo,str) and photo.startswith('https://'):schema['image']=photo
+            shop_image=next((url for url in (public_image_url(x) for x in public.get('photos',[])) if url),'')
+            if shop_image:schema['image']=shop_image
+            offers=[]
+            for item in public['services']:
+                service={'@type':'Service','name':item['name'],'serviceType':item['name'],'timeRequired':f"PT{int(item['duration'])}M",'provider':{'@type':'HairSalon','name':public['name'],'url':canonical}}
+                if item.get('description'):service['description']=item['description']
+                offers.append({'@type':'Offer','price':str(item['price']),'priceCurrency':'RON','itemOffered':service})
+            if offers:schema['hasOfferCatalog']={'@type':'OfferCatalog','name':'Servicii și prețuri','itemListElement':offers}
+            if public['team']:
+                schema['employee']=[{'@type':'Person','name':person['name'],'jobTitle':person['role'],'image':image} if (image:=public_image_url(person.get('photo'))) else {'@type':'Person','name':person['name'],'jobTitle':person['role']} for person in public['team']]
             if public.get('rating') and public.get('review_count'):
                 schema['aggregateRating']={'@type':'AggregateRating','ratingValue':public['rating'],'reviewCount':public['review_count']}
             ld=json.dumps(schema,ensure_ascii=False).replace('</','<\\/')
             page=re.sub(r'<script type="application/ld\+json">.*?</script>',f'<script type="application/ld+json">{ld}</script>',page,count=1,flags=re.S)
-            services_html=''.join(f"<li><strong>{html_escape(item['name'])}</strong> — {item['duration']} min · {item['price']} lei</li>" for item in public['services'])
-            team_html=''.join(f"<li>{html_escape(person['name'])} · {html_escape(person['role'])}</li>" for person in public['team'])
-            fallback=(f'<main class="wrap" style="padding:32px 20px"><h1>{html_escape(public["name"])}</h1>'
-                      f'<p>{html_escape(description)}</p><p>{html_escape(public["address"])}, {html_escape(public["city"])} · <a href="tel:{html_escape(public["phone"],quote=True)}">{html_escape(public["phone"])}</a></p>'
-                      f'<h2>Servicii și prețuri</h2><ul>{services_html}</ul><h2>Echipa</h2><ul>{team_html}</ul>'
+            service_rows=[]
+            for item in public['services']:
+                image=public_image_url(item.get('photo'))
+                image_html=f'<img src="{html_escape(image,quote=True)}" alt="{html_escape(item["name"],quote=True)}" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:12px;float:right;margin-left:16px">' if image else ''
+                detail_html=f'<p style="margin:6px 0 0;color:#6c716a">{html_escape(item["description"])}</p>' if item.get('description') else ''
+                service_rows.append(f'<li style="padding:16px 0;border-bottom:1px solid #e8e8e2">{image_html}<strong>{html_escape(item["name"])}</strong> · {item["duration"]} min · {item["price"]} lei{detail_html}</li>')
+            services_html=''.join(service_rows)
+            team_rows=[]
+            for person in public['team']:
+                image=public_image_url(person.get('photo'))
+                image_html=f'<img src="{html_escape(image,quote=True)}" alt="Fotografie {html_escape(person["name"],quote=True)}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:50%">' if image else ''
+                team_rows.append(f'<li style="display:flex;align-items:center;gap:12px;padding:10px 0">{image_html}<span><strong>{html_escape(person["name"])}</strong><br><span style="color:#6c716a">{html_escape(person["role"])}</span></span></li>')
+            team_html=''.join(team_rows)
+            hero_html=f'<img src="{html_escape(shop_image,quote=True)}" alt="{html_escape(public["name"],quote=True)}" style="width:100%;max-height:360px;object-fit:cover;border-radius:18px;margin:0 0 20px">' if shop_image else ''
+            rating_html=f'<p><strong>Evaluare: {public["rating"]}/5</strong> · {public["review_count"]} recenzii</p>' if public.get('rating') and public.get('review_count') else ''
+            fallback=(f'<main class="wrap" style="padding:32px 20px;max-width:1000px">{hero_html}<p class="eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>{html_escape(public["name"])}</h1>'
+                      f'<p>{html_escape(description)}</p><p>{html_escape(public["address"])}, {html_escape(public["city"])} · <a href="tel:{html_escape(public["phone"],quote=True)}">{html_escape(public["phone"])}</a></p>{rating_html}'
+                      f'<h2>Servicii și prețuri</h2><ul style="list-style:none;padding:0">{services_html}</ul><h2>Echipa</h2><ul style="list-style:none;padding:0">{team_html}</ul>'
                       f'<p><a href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Vezi disponibilitatea și rezervă online</a></p></main>')
             page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
             bootstrap=f"<script>if(!location.hash)location.hash='frizerie/'+{json.dumps(slug)};</script>"
