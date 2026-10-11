@@ -4,6 +4,8 @@ import base64, hashlib, hmac, http.server, json, os, re, secrets, smtplib, sqlit
 import unicodedata
 import ipaddress
 import threading
+from html import escape as html_escape
+from xml.sax.saxutils import escape as xml_escape
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from http import cookies
@@ -551,6 +553,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def clear_admin_session(self):return {'Set-Cookie':'tunspro_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+('; Secure' if os.environ.get('COOKIE_SECURE','0')=='1' else '')}
     def get(self):
         u=urllib.parse.urlparse(self.path); path=urllib.parse.unquote(u.path); q=urllib.parse.parse_qs(u.query)
+        if path=='/sitemap.xml':
+            with connect() as c:
+                shops=c.execute('SELECT * FROM shops ORDER BY slug').fetchall()
+                slugs=[urllib.parse.quote(row['slug'],safe='') for row in shops if shop_public(c,row)]
+            urls=['https://tunspro.ro/']+[f'https://tunspro.ro/frizerie/{slug}' for slug in slugs]
+            body=('<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                  +''.join(f'  <url><loc>{xml_escape(url)}</loc></url>\n' for url in urls)
+                  +'</urlset>\n').encode('utf-8')
+            self.send_response(200);self.send_header('Content-Type','application/xml; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=300');self.end_headers();self.wfile.write(body);return
+        profile_match=re.fullmatch(r'/frizerie/([a-zA-Z0-9-]{1,100})/?',path)
+        if profile_match:
+            slug=profile_match.group(1)
+            with connect() as c:
+                shop=c.execute('SELECT * FROM shops WHERE slug=?',(slug,)).fetchone()
+                public=shop_public(c,shop) if shop else None
+            if not public:return self.send_error(404)
+            title=f"{public['name']} — servicii și programări | TunsPro"
+            services=', '.join(x['name'] for x in public['services'][:4])
+            description=f"Programează-te online la {public['name']} din {public['city']}. Vezi serviciile și prețurile{(': '+services) if services else ''} și alege o oră disponibilă."
+            canonical=f"https://tunspro.ro/frizerie/{urllib.parse.quote(slug,safe='')}"
+            page=(ROOT/'index.html').read_text(encoding='utf-8')
+            page=page.replace('<link rel="canonical" href="https://tunspro.ro/">',f'<link rel="canonical" href="{html_escape(canonical,quote=True)}">',1)
+            page=page.replace('<meta name="description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online la TunsPro. Găsește barberul potrivit fără să-ți creezi cont.">',f'<meta name="description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<meta property="og:title" content="TunsPro — găsește și rezervă la frizerii din România">',f'<meta property="og:title" content="{html_escape(title,quote=True)}">',1)
+            page=page.replace('<meta property="og:description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online, simplu și fără cont de client.">',f'<meta property="og:description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<meta property="og:url" content="https://tunspro.ro/">',f'<meta property="og:url" content="{html_escape(canonical,quote=True)}">',1)
+            page=page.replace('<meta name="twitter:title" content="TunsPro — programări simple la frizerii">',f'<meta name="twitter:title" content="{html_escape(title,quote=True)}">',1)
+            page=page.replace('<meta name="twitter:description" content="Descoperă frizerii și rezervă online fără cont de client.">',f'<meta name="twitter:description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<title>TunsPro — Programări fără telefoane</title>',f'<title>{html_escape(title)}</title>',1)
+            schema={'@context':'https://schema.org','@type':'HairSalon','name':public['name'],'url':canonical,'description':description,'telephone':public['phone'],'address':{'@type':'PostalAddress','streetAddress':public['address'],'addressLocality':public['city'],'addressCountry':'RO'},'inLanguage':'ro-RO'}
+            if public.get('photos'):
+                photo=public['photos'][0]
+                if isinstance(photo,str) and photo.startswith('https://'):schema['image']=photo
+            if public.get('rating') and public.get('review_count'):
+                schema['aggregateRating']={'@type':'AggregateRating','ratingValue':public['rating'],'reviewCount':public['review_count']}
+            ld=json.dumps(schema,ensure_ascii=False).replace('</','<\\/')
+            page=re.sub(r'<script type="application/ld\+json">.*?</script>',f'<script type="application/ld+json">{ld}</script>',page,count=1,flags=re.S)
+            services_html=''.join(f"<li><strong>{html_escape(item['name'])}</strong> — {item['duration']} min · {item['price']} lei</li>" for item in public['services'])
+            team_html=''.join(f"<li>{html_escape(person['name'])} · {html_escape(person['role'])}</li>" for person in public['team'])
+            fallback=(f'<main class="wrap" style="padding:32px 20px"><h1>{html_escape(public["name"])}</h1>'
+                      f'<p>{html_escape(description)}</p><p>{html_escape(public["address"])}, {html_escape(public["city"])} · <a href="tel:{html_escape(public["phone"],quote=True)}">{html_escape(public["phone"])}</a></p>'
+                      f'<h2>Servicii și prețuri</h2><ul>{services_html}</ul><h2>Echipa</h2><ul>{team_html}</ul>'
+                      f'<p><a href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Vezi disponibilitatea și rezervă online</a></p></main>')
+            page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
+            bootstrap=f"<script>if(!location.hash)location.hash='frizerie/'+{json.dumps(slug)};</script>"
+            page=page.replace('<script src="client.js?',bootstrap+'<script src="client.js?',1)
+            body=page.encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=300');self.end_headers();self.wfile.write(body);return
         if path=='/api/admin/backup':
             with connect() as c:
                 admin=self.admin_auth(c)
