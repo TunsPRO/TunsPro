@@ -21,6 +21,27 @@ TZ = ZoneInfo('Europe/Bucharest')
 PLAN_PRICES = {'pro': 4900, 'business': 9900}
 SUBSCRIPTION_GRACE_DAYS = max(0, min(30, int(os.environ.get('SUBSCRIPTION_GRACE_DAYS', '7'))))
 MAX_REQUEST_BYTES = 2_200_000
+SEO_FALLBACK_STYLE = '''
+  html{font-family:"Manrope","DM Sans",system-ui,sans-serif;color:#171916;background:#f5f6f1}
+  body{margin:0;min-width:320px}
+  .seo-fallback{box-sizing:border-box;width:min(100% - 32px,980px);margin:28px auto 72px;padding:clamp(18px,4vw,40px);background:#fff;border:1px solid #e7e9e1;border-radius:22px;box-shadow:0 18px 48px #11130d0c;line-height:1.6}
+  .seo-fallback h1{font-family:"Manrope",system-ui,sans-serif;font-size:clamp(32px,6vw,52px);line-height:1.08;letter-spacing:-.045em;margin:8px 0 14px}
+  .seo-fallback h2{font-size:clamp(21px,3vw,28px);letter-spacing:-.03em;margin:30px 0 8px}
+  .seo-fallback p{margin:10px 0;color:#62675e}
+  .seo-fallback .seo-eyebrow{font-size:11px;font-weight:800;letter-spacing:.14em;color:#75804e}
+  .seo-fallback .seo-cover{display:block;width:100%;max-height:350px;object-fit:cover;border-radius:16px;margin:0 0 24px}
+  .seo-fallback .seo-primary{display:inline-flex;justify-content:center;align-items:center;min-height:48px;margin:8px 0 14px;padding:0 20px;border-radius:10px;background:#d7f45b;color:#171916;text-decoration:none;font-weight:800}
+  .seo-fallback .seo-service{min-height:72px;padding:15px 0;border-bottom:1px solid #e8e9e3}
+  .seo-fallback .seo-service img{float:right;width:68px;height:68px;object-fit:cover;border-radius:12px;margin:0 0 8px 14px}
+  .seo-fallback .seo-staff{display:flex;align-items:center;gap:12px;padding:8px 0}
+  .seo-fallback .seo-staff img{width:52px;height:52px;object-fit:cover;border-radius:50%}
+  .seo-directory-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px;margin-top:22px}
+  .seo-directory-card{padding:16px;border:1px solid #e6e8df;border-radius:16px;background:#fff}
+  .seo-directory-card img{width:100%;height:175px;object-fit:cover;border-radius:12px}
+  .seo-directory-card h2{margin:14px 0 6px;font-size:22px}
+  .seo-directory-card a{color:#556633;font-weight:700}
+  @media(max-width:600px){.seo-fallback{width:calc(100% - 20px);margin:10px auto 42px;padding:18px;border-radius:16px}.seo-fallback .seo-cover{max-height:220px}.seo-directory-card img{height:150px}}
+'''
 
 def load_env():
     p = ROOT / '.env'
@@ -394,6 +415,52 @@ def shop_public(c, shop):
     rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=? AND is_visible=1',(shop['id'],)).fetchone()
     return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':decode_schedule(x['weekly_schedule']),'weekly_breaks':decode_schedule(x['weekly_breaks'])} for x in team]}
 
+def shop_next_availability(c, shop, days=14):
+    """Return the earliest real slot, using the same schedule and collision rules as booking."""
+    now=datetime.now(TZ)
+    for offset in range(max(1,min(int(days),31))):
+        day=now.date()+timedelta(days=offset)
+        candidates=[]
+        for person in shop['team']:
+            staff={'id':person['id'],'shop_id':shop['id'],'weekly_schedule':person['weekly_schedule'],'weekly_breaks':person['weekly_breaks']}
+            hours=schedule_window(staff['weekly_schedule'],day)
+            if not hours:continue
+            start=datetime.combine(day,hours[0],TZ);end=datetime.combine(day,hours[1],TZ)
+            rows=c.execute("SELECT starts,ends FROM bookings WHERE shop_id=? AND staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(shop['id'],staff['id'],end.isoformat(),start.isoformat())).fetchall()
+            busy=[]
+            for item in rows:
+                occupied_start=datetime.fromisoformat(item['starts']);occupied_end=datetime.fromisoformat(item['ends'])
+                if occupied_start.tzinfo is None:occupied_start=occupied_start.replace(tzinfo=TZ)
+                else:occupied_start=occupied_start.astimezone(TZ)
+                if occupied_end.tzinfo is None:occupied_end=occupied_end.replace(tzinfo=TZ)
+                else:occupied_end=occupied_end.astimezone(TZ)
+                busy.append((occupied_start,occupied_end))
+            breaks=decode_schedule(staff['weekly_breaks']).get(str(day.weekday()),[])
+            if isinstance(breaks,dict):breaks=[breaks]
+            for pause in breaks if isinstance(breaks,list) else []:
+                try:busy.append((datetime.combine(day,time.fromisoformat(pause['start']),TZ),datetime.combine(day,time.fromisoformat(pause['end']),TZ)))
+                except (KeyError,TypeError,ValueError):continue
+            exceptions=c.execute('SELECT kind,start_time,end_time FROM staff_time_off WHERE staff_id=? AND shop_id=? AND start_date<=? AND end_date>=?',(staff['id'],shop['id'],day.isoformat(),day.isoformat())).fetchall()
+            unavailable=False
+            for item in exceptions:
+                if item['kind']!='break' or not item['start_time'] or not item['end_time']:
+                    unavailable=True;break
+                try:busy.append((datetime.combine(day,time.fromisoformat(item['start_time']),TZ),datetime.combine(day,time.fromisoformat(item['end_time']),TZ)))
+                except ValueError:unavailable=True;break
+            if unavailable:continue
+            cursor=start
+            while cursor<end and (not candidates or cursor<candidates[0][0]):
+                if cursor>now:
+                    for service in sorted(shop['services'],key=lambda item:(int(item['duration']),int(item['price']))):
+                        finish=cursor+timedelta(minutes=int(service['duration']))
+                        if finish<=end and all(finish<=busy_start or cursor>=busy_end for busy_start,busy_end in busy):
+                            candidates.append((cursor,person,service));break
+                cursor+=timedelta(minutes=15)
+        if candidates:
+            cursor,person,service=min(candidates,key=lambda item:item[0])
+            return {'date':day.isoformat(),'time':cursor.strftime('%H:%M'),'staff_name':person['name'],'service_name':service['name']}
+    return None
+
 def normalize_ro_mobile(value):
     digits=''.join(ch for ch in value if ch.isdigit())
     if digits.startswith('0040'):digits=digits[2:]
@@ -580,9 +647,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     photo_url=shop['photos'][0]
                     if photo_url.startswith(('https://','/media/')):
                         photo=f'<img src="{html_escape(photo_url,quote=True)}" alt="Fotografie {html_escape(shop["name"],quote=True)}" loading="lazy" style="width:100%;height:180px;object-fit:cover;border-radius:14px">'
-                cards.append(f'<article style="border:1px solid #e5e5df;border-radius:18px;padding:20px;background:#fff">{photo}<h2 style="margin:16px 0 6px"><a href="/frizerie/{slug}">{html_escape(shop["name"])}</a></h2><p>{html_escape(shop["city"])} · {html_escape(shop["address"])}</p><p>{html_escape(shop.get("tagline") or "Frizerie cu programări online")}</p><p><strong>Servicii:</strong> {html_escape(services) if services else 'Consultă serviciile disponibile în profil.'}</p><p><a href="/frizerie/{slug}">Vezi profilul și rezervă online →</a></p></article>')
-            fallback=(f'<main class="wrap" style="padding:40px 20px;max-width:1100px"><p class="eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>Frizerii cu programări online</h1><p style="max-width:720px">{html_escape(description)}</p><p><a href="/">← Înapoi la pagina principală</a></p><section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:28px">'+(''.join(cards) if cards else '<p>Momentan nu există frizerii publice disponibile. Revino în curând.</p>')+'</section></main>')
+                cards.append(f'<article class="seo-directory-card">{photo}<h2><a href="/frizerie/{slug}">{html_escape(shop["name"])}</a></h2><p>{html_escape(shop["city"])} · {html_escape(shop["address"])}</p><p>{html_escape(shop.get("tagline") or "Frizerie cu programări online")}</p><p><strong>Servicii:</strong> {html_escape(services) if services else "Consultă serviciile disponibile în profil."}</p><p><a href="/frizerie/{slug}">Vezi profilul și rezervă online →</a></p></article>')
+            fallback=(f'<main class="seo-fallback"><p class="seo-eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>Frizerii cu programări online</h1><p>{html_escape(description)}</p><p><a href="/">← Înapoi la pagina principală</a></p><section class="seo-directory-grid">'+(''.join(cards) if cards else '<p>Momentan nu există frizerii publice disponibile. Revino în curând.</p>')+'</section></main>')
             page=(ROOT/'index.html').read_text(encoding='utf-8')
+            page=page.replace('</head>',f'<style>{SEO_FALLBACK_STYLE}</style></head>',1)
             page=page.replace('<link rel="canonical" href="https://tunspro.ro/">',f'<link rel="canonical" href="{canonical}">',1)
             page=page.replace('<meta name="description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online la TunsPro. Găsește barberul potrivit fără să-ți creezi cont.">',f'<meta name="description" content="{html_escape(description,quote=True)}">',1)
             page=page.replace('<meta property="og:title" content="TunsPro — găsește și rezervă la frizerii din România">',f'<meta property="og:title" content="{title}">',1)
@@ -651,12 +719,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 image_html=f'<img src="{html_escape(image,quote=True)}" alt="Fotografie {html_escape(person["name"],quote=True)}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:50%">' if image else ''
                 team_rows.append(f'<li style="display:flex;align-items:center;gap:12px;padding:10px 0">{image_html}<span><strong>{html_escape(person["name"])}</strong><br><span style="color:#6c716a">{html_escape(person["role"])}</span></span></li>')
             team_html=''.join(team_rows)
-            hero_html=f'<img src="{html_escape(shop_image,quote=True)}" alt="{html_escape(public["name"],quote=True)}" style="width:100%;max-height:360px;object-fit:cover;border-radius:18px;margin:0 0 20px">' if shop_image else ''
+            hero_html=f'<img class="seo-cover" src="{html_escape(shop_image,quote=True)}" alt="{html_escape(public["name"],quote=True)}">' if shop_image else ''
             rating_html=f'<p><strong>Evaluare: {public["rating"]}/5</strong> · {public["review_count"]} recenzii</p>' if public.get('rating') and public.get('review_count') else ''
-            fallback=(f'<main class="wrap" style="padding:32px 20px;max-width:1000px">{hero_html}<p class="eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>{html_escape(public["name"])}</h1>'
+            fallback=(f'<main class="seo-fallback">{hero_html}<p class="seo-eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>{html_escape(public["name"])}</h1>'
                       f'<p>{html_escape(description)}</p><p>{html_escape(public["address"])}, {html_escape(public["city"])} · <a href="tel:{html_escape(public["phone"],quote=True)}">{html_escape(public["phone"])}</a></p>{rating_html}'
+                      f'<a class="seo-primary" href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Alege serviciul și rezervă o oră →</a>'
                       f'<h2>Servicii și prețuri</h2><ul style="list-style:none;padding:0">{services_html}</ul><h2>Echipa</h2><ul style="list-style:none;padding:0">{team_html}</ul>'
                       f'<p><a href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Vezi disponibilitatea și rezervă online</a></p></main>')
+            page=page.replace('</head>',f'<style>{SEO_FALLBACK_STYLE}</style></head>',1)
             page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
             bootstrap=f"<script>if(!location.hash)location.hash='frizerie/'+{json.dumps(slug)};</script>"
             page=page.replace('<script src="client.js?',bootstrap+'<script src="client.js?',1)
@@ -810,6 +880,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not shop:return self.json_response(404,{'error':'Frizeria nu a fost găsită.'})
                 public=shop_public(c,shop)
                 if not public:return self.json_response(404,{'error':'Profil indisponibil.'})
+                if len(parts)>5 and parts[5]=='next-availability':
+                    return self.json_response(200,{'slot':shop_next_availability(c,public)})
                 if len(parts)>5 and parts[5]=='availability':
                     try: day=date.fromisoformat(q.get('date',[''])[0]); service_id=int(q.get('service',['0'])[0]); staff_id=int(q.get('staff',['0'])[0])
                     except Exception:return self.json_response(400,{'error':'Alege data, serviciul și frizerul.'})

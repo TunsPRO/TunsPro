@@ -300,3 +300,11 @@
 .footer .brand-word{font-size:19px}
 .footer .brand-word small{font-size:5px;letter-spacing:1.7px}
 .sidebar .brand-symbol,.footer .brand-symbol{background:#10110f;border-radius:12px}
+
+.directory-availability-note{margin:-5px 0 14px;color:var(--muted);font-size:11px;line-height:1.5}
+.directory-next-slot{display:flex;align-items:flex-start;gap:8px;min-height:42px;margin:0 0 12px;padding:9px 10px;border:1px solid #e9eddd;border-radius:9px;background:#f8faef;color:#586541;font-size:11px;line-height:1.4}
+.directory-next-slot>[aria-hidden="true"]{flex:0 0 auto;color:#788b42;font-size:17px;line-height:1}
+.directory-next-slot>span:last-child{display:grid;gap:2px}
+.directory-next-slot strong{font-size:11px}
+.directory-next-slot small{color:var(--muted);font-size:10px}
+@media(max-width:680px){.directory-availability-note{margin:-3px 0 10px;font-size:10px}.directory-next-slot{min-height:0;margin:0 0 8px;padding:7px;font-size:9px}.directory-next-slot strong{font-size:9px}.directory-next-slot small{font-size:8px}}
