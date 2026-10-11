@@ -334,35 +334,60 @@ def decode_schedule(value):
         return parsed if isinstance(parsed,dict) else {}
     except (TypeError,ValueError):return {}
 
-def schedule_window(schedule, day):
+def schedule_windows(schedule, day):
+    """Normalize legacy [start,end] and multi-window [[start,end], ...] schedules."""
     entry=decode_schedule(schedule).get(str(day.weekday()))
-    if isinstance(entry,dict):start,end=entry.get('start'),entry.get('end')
-    elif isinstance(entry,list) and len(entry)>=2:start,end=entry[0],entry[1]
-    else:return None
+    if isinstance(entry,dict):entries=[[entry.get('start'),entry.get('end')]]
+    elif isinstance(entry,list) and len(entry)>=2 and all(isinstance(x,str) for x in entry[:2]):entries=[entry[:2]]
+    elif isinstance(entry,list):entries=entry
+    else:return []
+    checked=[]
     try:
-        start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
-        if start>=end:return None
-        return start,end
-    except (TypeError,ValueError):return None
+        for interval in entries:
+            if isinstance(interval,dict):start,end=interval.get('start'),interval.get('end')
+            elif isinstance(interval,(list,tuple)) and len(interval)==2:start,end=interval
+            else:continue
+            start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
+            if start>=end:return []
+            checked.append((start,end))
+    except (TypeError,ValueError):return []
+    checked.sort()
+    if any(start<previous_end for (_,previous_end),(start,_) in zip(checked,checked[1:])):return []
+    return checked
+
+def schedule_window(schedule, day):
+    windows=schedule_windows(schedule,day)
+    return (windows[0][0],windows[-1][1]) if windows else None
 
 def validate_weekly_schedule(value):
     if not isinstance(value,dict):raise ValueError('Verifică programul de lucru.')
     normalized={}
     for day_key,entry in value.items():
         if str(day_key) not in {str(i) for i in range(7)}:raise ValueError('Programul conține o zi invalidă.')
-        if isinstance(entry,dict):start,end=entry.get('start'),entry.get('end')
-        elif isinstance(entry,list) and len(entry)==2:start,end=entry
-        else:raise ValueError('Completează orele de început și de sfârșit pentru fiecare zi lucrătoare.')
-        try:start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
-        except (TypeError,ValueError):raise ValueError('Introdu ore valide pentru programul de lucru.')
-        if start.tzinfo or end.tzinfo:raise ValueError('Orele se introduc în fusul orar local al frizeriei.')
-        if start>=end:raise ValueError('Ora de sfârșit trebuie să fie după ora de început.')
-        normalized[str(day_key)]=[start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes')]
+        if isinstance(entry,dict):entries=[[entry.get('start'),entry.get('end')]]
+        elif isinstance(entry,list) and len(entry)>=2 and all(isinstance(x,str) for x in entry[:2]):entries=[entry[:2]]
+        elif isinstance(entry,list):entries=entry
+        else:raise ValueError('Completează orele de început și de sfârșit pentru fiecare interval lucrător.')
+        checked=[]
+        for interval in entries:
+            if isinstance(interval,dict):start,end=interval.get('start'),interval.get('end')
+            elif isinstance(interval,(list,tuple)) and len(interval)==2:start,end=interval
+            else:raise ValueError('Verifică intervalele de lucru.')
+            try:start=time.fromisoformat(str(start));end=time.fromisoformat(str(end))
+            except (TypeError,ValueError):raise ValueError('Introdu ore valide pentru programul de lucru.')
+            if start.tzinfo or end.tzinfo:raise ValueError('Orele se introduc în fusul orar local al frizeriei.')
+            if start>=end:raise ValueError('Ora de sfârșit trebuie să fie după ora de început.')
+            checked.append((start,end))
+        checked.sort()
+        if any(start<previous_end for (_,previous_end),(start,_) in zip(checked,checked[1:])):raise ValueError('Intervalele de lucru din aceeași zi nu se pot suprapune.')
+        normalized[str(day_key)]=[[start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes')] for start,end in checked]
     return normalized
 
 def staff_slot_matches(c, staff, day, starts, finish):
-    window=schedule_window(staff['weekly_schedule'],day)
-    if not window or starts.replace(tzinfo=None).time()<window[0] or finish.replace(tzinfo=None).time()>window[1]:return False
+    windows=schedule_windows(staff['weekly_schedule'],day)
+    starts_clock=starts.replace(tzinfo=None).time();finish_clock=finish.replace(tzinfo=None).time()
+    window=next(((a,b) for a,b in windows if starts_clock>=a and finish_clock<=b),None)
+    if not window:return False
     try:slot_interval=int(staff['slot_interval'])
     except (KeyError,TypeError,ValueError):slot_interval=30
     if slot_interval not in (15,30):slot_interval=30
@@ -393,16 +418,16 @@ def validate_weekly_breaks(schedule, value):
         if isinstance(entries,dict):entries=[entries]
         if not isinstance(entries,list):raise ValueError('Verifică intervalele de pauză.')
         day=date(2024,1,1)+timedelta(days=(int(day_key)-date(2024,1,1).weekday())%7)
-        window=schedule_window(schedule,day)
+        windows=schedule_windows(schedule,day)
         if not entries:continue
-        if not window:raise ValueError('Setează mai întâi programul de lucru pentru ziua cu pauză.')
+        if not windows:raise ValueError('Setează mai întâi programul de lucru pentru ziua cu pauză.')
         checked=[]
         for entry in entries:
             if not isinstance(entry,dict):raise ValueError('Verifică intervalele de pauză.')
             try:start=time.fromisoformat(str(entry['start']));end=time.fromisoformat(str(entry['end']))
             except (KeyError,TypeError,ValueError):raise ValueError('Introdu ore valide pentru pauză.')
             if start.tzinfo or end.tzinfo:raise ValueError('Orele pauzei se introduc în fusul orar local al frizeriei.')
-            if start>=end or start<window[0] or end>window[1]:raise ValueError('Pauza trebuie să fie în interiorul programului de lucru.')
+            if start>=end or not any(start>=work_start and end<=work_end for work_start,work_end in windows):raise ValueError('Pauza trebuie să fie în interiorul unui interval de lucru.')
             if any(start<other_end and end>other_start for other_start,other_end in checked):raise ValueError('Pauzele din aceeași zi nu se pot suprapune.')
             checked.append((start,end))
         normalized[str(day_key)]=[{'start':start.isoformat(timespec='minutes'),'end':end.isoformat(timespec='minutes')} for start,end in sorted(checked)]
@@ -430,18 +455,19 @@ def shop_next_availability(c, shop, days=14):
         candidates=[]
         for person in shop['team']:
             staff={'id':person['id'],'shop_id':shop['id'],'weekly_schedule':person['weekly_schedule'],'weekly_breaks':person['weekly_breaks'],'slot_interval':person.get('slot_interval',30)}
-            hours=schedule_window(staff['weekly_schedule'],day)
-            if not hours:continue
-            start=datetime.combine(day,hours[0],TZ);end=datetime.combine(day,hours[1],TZ)
-            rows=c.execute("SELECT starts,ends FROM bookings WHERE shop_id=? AND staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(shop['id'],staff['id'],end.isoformat(),start.isoformat())).fetchall()
             busy=[]
-            for item in rows:
-                occupied_start=datetime.fromisoformat(item['starts']);occupied_end=datetime.fromisoformat(item['ends'])
-                if occupied_start.tzinfo is None:occupied_start=occupied_start.replace(tzinfo=TZ)
-                else:occupied_start=occupied_start.astimezone(TZ)
-                if occupied_end.tzinfo is None:occupied_end=occupied_end.replace(tzinfo=TZ)
-                else:occupied_end=occupied_end.astimezone(TZ)
-                busy.append((occupied_start,occupied_end))
+            windows=schedule_windows(staff['weekly_schedule'],day)
+            if not windows:continue
+            for work_start,work_end in windows:
+                start=datetime.combine(day,work_start,TZ);end=datetime.combine(day,work_end,TZ)
+                rows=c.execute("SELECT starts,ends FROM bookings WHERE shop_id=? AND staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(shop['id'],staff['id'],end.isoformat(),start.isoformat())).fetchall()
+                for item in rows:
+                    occupied_start=datetime.fromisoformat(item['starts']);occupied_end=datetime.fromisoformat(item['ends'])
+                    if occupied_start.tzinfo is None:occupied_start=occupied_start.replace(tzinfo=TZ)
+                    else:occupied_start=occupied_start.astimezone(TZ)
+                    if occupied_end.tzinfo is None:occupied_end=occupied_end.replace(tzinfo=TZ)
+                    else:occupied_end=occupied_end.astimezone(TZ)
+                    busy.append((occupied_start,occupied_end))
             breaks=decode_schedule(staff['weekly_breaks']).get(str(day.weekday()),[])
             if isinstance(breaks,dict):breaks=[breaks]
             for pause in breaks if isinstance(breaks,list) else []:
@@ -455,14 +481,15 @@ def shop_next_availability(c, shop, days=14):
                 try:busy.append((datetime.combine(day,time.fromisoformat(item['start_time']),TZ),datetime.combine(day,time.fromisoformat(item['end_time']),TZ)))
                 except ValueError:unavailable=True;break
             if unavailable:continue
-            cursor=start
-            while cursor<end and (not candidates or cursor<candidates[0][0]):
-                if cursor>now:
-                    for service in sorted(shop['services'],key=lambda item:(int(item['duration']),int(item['price']))):
-                        finish=cursor+timedelta(minutes=int(service['duration']))
-                        if finish<=end and all(finish<=busy_start or cursor>=busy_end for busy_start,busy_end in busy):
-                            candidates.append((cursor,person,service));break
-                cursor+=timedelta(minutes=staff['slot_interval'])
+            for work_start,work_end in windows:
+                start=datetime.combine(day,work_start,TZ);end=datetime.combine(day,work_end,TZ);cursor=start
+                while cursor<end and (not candidates or cursor<candidates[0][0]):
+                    if cursor>now:
+                        for service in sorted(shop['services'],key=lambda item:(int(item['duration']),int(item['price']))):
+                            finish=cursor+timedelta(minutes=int(service['duration']))
+                            if finish<=end and staff_slot_matches(c,staff,day,cursor,finish) and all(finish<=busy_start or cursor>=busy_end for busy_start,busy_end in busy):
+                                candidates.append((cursor,person,service));break
+                    cursor+=timedelta(minutes=staff['slot_interval'])
         if candidates:
             cursor,person,service=min(candidates,key=lambda item:item[0])
             return {'date':day.isoformat(),'time':cursor.strftime('%H:%M'),'staff_name':person['name'],'service_name':service['name']}
@@ -856,10 +883,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     try:schedule=json.loads(person['weekly_schedule'] or '{}')
                     except (TypeError,ValueError):schedule={}
                     for offset in range(30):
-                        work_day=local_today-timedelta(days=offset);hours=schedule.get(str(work_day.weekday()))
-                        if not hours or len(hours)!=2:continue
-                        try:capacity_minutes+=max(0,int((time.fromisoformat(hours[1]).hour*60+time.fromisoformat(hours[1]).minute)-(time.fromisoformat(hours[0]).hour*60+time.fromisoformat(hours[0]).minute)))
-                        except (TypeError,ValueError):continue
+                        work_day=local_today-timedelta(days=offset)
+                        for opening,closing in schedule_windows(schedule,work_day):
+                            capacity_minutes+=max(0,(closing.hour*60+closing.minute)-(opening.hour*60+opening.minute))
                     booked_minutes+=count("SELECT COALESCE(SUM((julianday(ends)-julianday(starts))*1440),0) FROM bookings WHERE staff_id=? AND status IN ('confirmed','completed') AND starts>=? AND starts<?",(person['id'],(local_today-timedelta(days=29)).isoformat(),(local_today+timedelta(days=1)).isoformat()))
                 occupancy_rate=round(min(100,booked_minutes/capacity_minutes*100),1) if capacity_minutes else None
                 top_services=[dict(x) for x in c.execute("SELECT s.name service_name,COUNT(*) count FROM bookings b JOIN services s ON s.id=b.service_id WHERE b.created>=? AND b.status<>'cancelled' GROUP BY s.id ORDER BY count DESC LIMIT 5",(days_30_start,)).fetchall()]
@@ -895,18 +921,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     service=c.execute('SELECT * FROM services WHERE id=? AND shop_id=? AND active=1',(service_id,shop['id'])).fetchone()
                     staff=c.execute('SELECT * FROM staff WHERE id=? AND shop_id=? AND active=1',(staff_id,shop['id'])).fetchone()
                     if not service or not staff:return self.json_response(400,{'error':'Serviciul sau frizerul nu este disponibil.'})
-                    schedule=decode_schedule(staff['weekly_schedule']); hours=schedule_window(schedule,day)
                     slots=[]
-                    if hours:
-                        start=datetime.combine(day,hours[0],TZ); end=datetime.combine(day,hours[1],TZ)
+                    for work_start,work_end in schedule_windows(staff['weekly_schedule'],day):
+                        start=datetime.combine(day,work_start,TZ);end=datetime.combine(day,work_end,TZ)
                         rows=c.execute("SELECT starts,ends FROM bookings WHERE staff_id=? AND status IN ('confirmed','pending') AND julianday(starts)<julianday(?) AND julianday(ends)>julianday(?)",(staff_id,end.isoformat(),start.isoformat())).fetchall()
-                        busy=[(datetime.fromisoformat(x['starts']).astimezone(TZ),datetime.fromisoformat(x['ends']).astimezone(TZ)) for x in rows]
+                        busy=[]
+                        for item in rows:
+                            busy_start=datetime.fromisoformat(item['starts']);busy_end=datetime.fromisoformat(item['ends'])
+                            busy.append((busy_start.astimezone(TZ) if busy_start.tzinfo else busy_start.replace(tzinfo=TZ),busy_end.astimezone(TZ) if busy_end.tzinfo else busy_end.replace(tzinfo=TZ)))
                         cursor=start
                         while cursor+timedelta(minutes=service['duration'])<=end:
                             finish=cursor+timedelta(minutes=service['duration'])
                             if cursor>datetime.now(TZ) and all(finish<=a or cursor>=b for a,b in busy) and staff_slot_matches(c,staff,day,cursor,finish):slots.append(cursor.strftime('%H:%M'))
                             cursor+=timedelta(minutes=int(staff['slot_interval'] or 30))
-                    return self.json_response(200,{'slots':slots})
+                    return self.json_response(200,{'slots':sorted(set(slots))})
                 return self.json_response(200,{'shop':public})
         if path.startswith('/api/manage/'):
             with connect() as c:
