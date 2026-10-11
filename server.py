@@ -557,12 +557,47 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with connect() as c:
                 shops=c.execute('SELECT * FROM shops ORDER BY slug').fetchall()
                 slugs=[urllib.parse.quote(row['slug'],safe='') for row in shops if shop_public(c,row)]
-            urls=['https://tunspro.ro/']+[f'https://tunspro.ro/frizerie/{slug}' for slug in slugs]
+            urls=['https://tunspro.ro/','https://tunspro.ro/frizerii']+[f'https://tunspro.ro/frizerie/{slug}' for slug in slugs]
             body=('<?xml version="1.0" encoding="UTF-8"?>\n'
                   '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
                   +''.join(f'  <url><loc>{xml_escape(url)}</loc></url>\n' for url in urls)
                   +'</urlset>\n').encode('utf-8')
             self.send_response(200);self.send_header('Content-Type','application/xml; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=300');self.end_headers();self.wfile.write(body);return
+        if path in ('/frizerii','/frizerii/'):
+            with connect() as c:
+                rows=c.execute('SELECT * FROM shops ORDER BY city COLLATE NOCASE, name COLLATE NOCASE').fetchall()
+                listings=[shop_public(c,row) for row in rows]
+            listings=[shop for shop in listings if shop]
+            canonical='https://tunspro.ro/frizerii'
+            title='Frizerii cu programări online în România | TunsPro'
+            description='Descoperă frizerii cu profil public activ, compară serviciile și prețurile și rezervă online fără cont de client.'
+            cards=[]
+            for shop in listings:
+                slug=urllib.parse.quote(shop['slug'],safe='')
+                services=', '.join(f"{item['name']} ({item['price']} lei)" for item in shop['services'][:3])
+                photo=''
+                if shop.get('photos') and isinstance(shop['photos'][0],str):
+                    photo_url=shop['photos'][0]
+                    if photo_url.startswith(('https://','/media/')):
+                        photo=f'<img src="{html_escape(photo_url,quote=True)}" alt="Fotografie {html_escape(shop["name"],quote=True)}" loading="lazy" style="width:100%;height:180px;object-fit:cover;border-radius:14px">'
+                cards.append(f'<article style="border:1px solid #e5e5df;border-radius:18px;padding:20px;background:#fff">{photo}<h2 style="margin:16px 0 6px"><a href="/frizerie/{slug}">{html_escape(shop["name"])}</a></h2><p>{html_escape(shop["city"])} · {html_escape(shop["address"])}</p><p>{html_escape(shop.get("tagline") or "Frizerie cu programări online")}</p><p><strong>Servicii:</strong> {html_escape(services) if services else 'Consultă serviciile disponibile în profil.'}</p><p><a href="/frizerie/{slug}">Vezi profilul și rezervă online →</a></p></article>')
+            fallback=(f'<main class="wrap" style="padding:40px 20px;max-width:1100px"><p class="eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>Frizerii cu programări online</h1><p style="max-width:720px">{html_escape(description)}</p><p><a href="/">← Înapoi la pagina principală</a></p><section style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:28px">'+(''.join(cards) if cards else '<p>Momentan nu există frizerii publice disponibile. Revino în curând.</p>')+'</section></main>')
+            page=(ROOT/'index.html').read_text(encoding='utf-8')
+            page=page.replace('<link rel="canonical" href="https://tunspro.ro/">',f'<link rel="canonical" href="{canonical}">',1)
+            page=page.replace('<meta name="description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online la TunsPro. Găsește barberul potrivit fără să-ți creezi cont.">',f'<meta name="description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<meta property="og:title" content="TunsPro — găsește și rezervă la frizerii din România">',f'<meta property="og:title" content="{title}">',1)
+            page=page.replace('<meta property="og:description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online, simplu și fără cont de client.">',f'<meta property="og:description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<meta property="og:url" content="https://tunspro.ro/">',f'<meta property="og:url" content="{canonical}">',1)
+            page=page.replace('<meta name="twitter:title" content="TunsPro — programări simple la frizerii">',f'<meta name="twitter:title" content="{title}">',1)
+            page=page.replace('<meta name="twitter:description" content="Descoperă frizerii și rezervă online fără cont de client.">',f'<meta name="twitter:description" content="{html_escape(description,quote=True)}">',1)
+            page=page.replace('<title>TunsPro — Programări fără telefoane</title>',f'<title>{title}</title>',1)
+            item_list={'@context':'https://schema.org','@type':'CollectionPage','name':title,'url':canonical,'description':description,'inLanguage':'ro-RO','mainEntity':{'@type':'ItemList','itemListElement':[{'@type':'ListItem','position':position,'name':shop['name'],'url':f"https://tunspro.ro/frizerie/{urllib.parse.quote(shop['slug'],safe='')}"} for position,shop in enumerate(listings,1)]}}
+            ld=json.dumps(item_list,ensure_ascii=False).replace('</','<\\/')
+            page=re.sub(r'<script type="application/ld\+json">.*?</script>',f'<script type="application/ld+json">{ld}</script>',page,count=1,flags=re.S)
+            page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
+            bootstrap="<script>if(location.pathname==='/frizerii'&&!location.hash)location.hash='cauta';</script>"
+            page=page.replace('<script src="client.js?',bootstrap+'<script src="client.js?',1)
+            body=page.encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=300');self.end_headers();self.wfile.write(body);return
         profile_match=re.fullmatch(r'/frizerie/([a-zA-Z0-9-]{1,100})/?',path)
         if profile_match:
             slug=profile_match.group(1)
