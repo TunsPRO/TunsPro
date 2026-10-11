@@ -413,6 +413,25 @@
 
 .home-search-form .input:disabled{background:#f4f5f0;color:#92958c;cursor:not-allowed}
 .home-search-form label{min-width:0}
+/* Onboarding checklist: completion comes from saved dashboard data. */
+.setup-progress{display:grid;gap:10px;margin:18px 0 12px;padding:17px 19px;border:1px solid var(--line);border-radius:13px;background:#fff}
+.setup-progress-copy{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.setup-progress-copy strong{font:700 14px Manrope;letter-spacing:-.02em}
+.setup-progress-copy>span{color:var(--muted);font-size:12px;text-align:right}
+.setup-progress-track{height:8px;overflow:hidden;border-radius:99px;background:#eff0e9}
+.setup-progress-track>span{display:block;height:100%;border-radius:inherit;background:var(--lime);transition:width .2s ease}
+.setup-card{position:relative;align-content:start;min-height:156px;border:1px solid var(--line);transition:border-color .16s,background .16s,transform .16s}
+.setup-card:hover,.setup-card:focus-visible{border-color:#bacb75;background:#fffef9;transform:translateY(-1px)}
+.setup-card:focus-visible{outline:3px solid #d7f16b99;outline-offset:2px}
+.setup-card.is-complete{border-color:#dce6bd;background:#fbfcf7}
+.setup-card .setup-step{font-size:12px;letter-spacing:.03em}
+.setup-card .setup-status,.setup-card .setup-open{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700}
+.setup-card .setup-status{color:#777b74}
+.setup-card.is-complete .setup-status{color:#506638}
+.setup-card .setup-status b{display:grid;place-items:center;width:19px;height:19px;border:1px solid #c7cbbd;border-radius:50%;font-size:12px}
+.setup-card.is-complete .setup-status b{border-color:var(--lime);background:var(--lime);color:var(--ink)}
+.setup-card .setup-open{color:#687741}
+@media(max-width:560px){.setup-progress{gap:9px;margin:15px 0 10px;padding:15px}.setup-progress-copy{align-items:flex-start;flex-direction:column;gap:4px}.setup-progress-copy>span{text-align:left}.setup-grid{gap:10px}.setup-card{min-height:0;padding:17px;gap:7px}.setup-card .setup-status{margin-top:3px}.setup-upgrade{padding:16px}}
 @media(max-width:680px){
   .hero-grid{width:min(1180px,calc(100% - 32px))}
   .booking-card{padding:17px}
