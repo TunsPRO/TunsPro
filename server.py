@@ -108,7 +108,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
         CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, photo TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', weekly_breaks TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', weekly_breaks TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '', slot_interval INTEGER NOT NULL DEFAULT 30 CHECK(slot_interval IN (15,30)));
         CREATE TABLE IF NOT EXISTS staff_time_off(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, kind TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT, label TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS staff_time_off_dates ON staff_time_off(staff_id,start_date,end_date);
         CREATE TABLE IF NOT EXISTS bookings(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id), service_id INTEGER NOT NULL REFERENCES services(id), staff_id INTEGER NOT NULL REFERENCES staff(id), client TEXT NOT NULL, phone TEXT NOT NULL, email TEXT DEFAULT '', starts TEXT NOT NULL, ends TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'confirmed', created TEXT NOT NULL, reminder_at TEXT, reminder_sent INTEGER NOT NULL DEFAULT 0, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, price_at_booking INTEGER, manage_token_hash TEXT);
@@ -147,6 +147,8 @@ def init_db():
             c.execute("ALTER TABLE staff ADD COLUMN photo TEXT NOT NULL DEFAULT ''")
         if 'weekly_breaks' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
             c.execute("ALTER TABLE staff ADD COLUMN weekly_breaks TEXT NOT NULL DEFAULT '{}'")
+        if 'slot_interval' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
+            c.execute('ALTER TABLE staff ADD COLUMN slot_interval INTEGER NOT NULL DEFAULT 30')
         if 'plan' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
             c.execute("ALTER TABLE subscriptions ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
         if 'stripe_event_created' not in {row['name'] for row in c.execute('PRAGMA table_info(subscriptions)')}:
@@ -361,6 +363,11 @@ def validate_weekly_schedule(value):
 def staff_slot_matches(c, staff, day, starts, finish):
     window=schedule_window(staff['weekly_schedule'],day)
     if not window or starts.replace(tzinfo=None).time()<window[0] or finish.replace(tzinfo=None).time()>window[1]:return False
+    try:slot_interval=int(staff['slot_interval'])
+    except (KeyError,TypeError,ValueError):slot_interval=30
+    if slot_interval not in (15,30):slot_interval=30
+    opening=datetime.combine(day,window[0],TZ)
+    if (starts-opening).total_seconds()<0 or int((starts-opening).total_seconds())%(slot_interval*60):return False
     breaks=decode_schedule(staff['weekly_breaks']).get(str(day.weekday()),[])
     if isinstance(breaks,dict):breaks=[breaks]
     for pause in breaks if isinstance(breaks,list) else []:
@@ -409,7 +416,7 @@ def shop_public(c, shop):
     sub = c.execute('SELECT * FROM subscriptions WHERE shop_id=?', (shop['id'],)).fetchone()
     if not active_subscription(sub) or not shop['listing_enabled']: return None
     svc = c.execute('SELECT id,name,description,duration,price,photo FROM services WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
-    team = c.execute('SELECT id,name,role,photo,weekly_schedule,weekly_breaks FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
+    team = c.execute('SELECT id,name,role,photo,weekly_schedule,weekly_breaks,slot_interval FROM staff WHERE shop_id=? AND active=1 ORDER BY id', (shop['id'],)).fetchall()
     if not svc or not team: return None
     reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? AND is_visible=1 ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
     rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=? AND is_visible=1',(shop['id'],)).fetchone()
@@ -422,7 +429,7 @@ def shop_next_availability(c, shop, days=14):
         day=now.date()+timedelta(days=offset)
         candidates=[]
         for person in shop['team']:
-            staff={'id':person['id'],'shop_id':shop['id'],'weekly_schedule':person['weekly_schedule'],'weekly_breaks':person['weekly_breaks']}
+            staff={'id':person['id'],'shop_id':shop['id'],'weekly_schedule':person['weekly_schedule'],'weekly_breaks':person['weekly_breaks'],'slot_interval':person.get('slot_interval',30)}
             hours=schedule_window(staff['weekly_schedule'],day)
             if not hours:continue
             start=datetime.combine(day,hours[0],TZ);end=datetime.combine(day,hours[1],TZ)
@@ -455,7 +462,7 @@ def shop_next_availability(c, shop, days=14):
                         finish=cursor+timedelta(minutes=int(service['duration']))
                         if finish<=end and all(finish<=busy_start or cursor>=busy_end for busy_start,busy_end in busy):
                             candidates.append((cursor,person,service));break
-                cursor+=timedelta(minutes=15)
+                cursor+=timedelta(minutes=staff['slot_interval'])
         if candidates:
             cursor,person,service=min(candidates,key=lambda item:item[0])
             return {'date':day.isoformat(),'time':cursor.strftime('%H:%M'),'staff_name':person['name'],'service_name':service['name']}
@@ -898,7 +905,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         while cursor+timedelta(minutes=service['duration'])<=end:
                             finish=cursor+timedelta(minutes=service['duration'])
                             if cursor>datetime.now(TZ) and all(finish<=a or cursor>=b for a,b in busy) and staff_slot_matches(c,staff,day,cursor,finish):slots.append(cursor.strftime('%H:%M'))
-                            cursor+=timedelta(minutes=15)
+                            cursor+=timedelta(minutes=int(staff['slot_interval'] or 30))
                     return self.json_response(200,{'slots':slots})
                 return self.json_response(200,{'shop':public})
         if path.startswith('/api/manage/'):
@@ -1056,11 +1063,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         weekly_breaks=validate_weekly_breaks(weekly,break_raw or {})
                         photo=str(x.get('photo','') or '')
                         if photo and not re.fullmatch(r'/media/[0-9a-f]{32}\.(?:jpg|png|webp)',photo):return self.json_response(400,{'error':'Verifică fotografia frizerului.'})
-                        vals=(x['name'],x.get('role','Frizer'),json.dumps(weekly),json.dumps(weekly_breaks),int(bool(x.get('active',1))),photo)
+                        try:slot_interval=int(x.get('slot_interval',30))
+                        except (TypeError,ValueError):return self.json_response(400,{'error':'Alege intervale de 15 sau 30 de minute.'})
+                        if slot_interval not in (15,30):return self.json_response(400,{'error':'Alege intervale de 15 sau 30 de minute.'})
+                        vals=(x['name'],x.get('role','Frizer'),json.dumps(weekly),json.dumps(weekly_breaks),int(bool(x.get('active',1))),photo,slot_interval)
                         if x.get('id'):
-                            c.execute('UPDATE staff SET name=?,role=?,weekly_schedule=?,weekly_breaks=?,active=?,photo=? WHERE id=? AND shop_id=?',(*vals,int(x['id']),sid));ids.append(int(x['id']))
+                            c.execute('UPDATE staff SET name=?,role=?,weekly_schedule=?,weekly_breaks=?,active=?,photo=?,slot_interval=? WHERE id=? AND shop_id=?',(*vals,int(x['id']),sid));ids.append(int(x['id']))
                         else:
-                            cur=c.execute('INSERT INTO staff(shop_id,name,role,weekly_schedule,weekly_breaks,active,photo) VALUES(?,?,?,?,?,?,?)',(sid,*vals));ids.append(cur.lastrowid)
+                            cur=c.execute('INSERT INTO staff(shop_id,name,role,weekly_schedule,weekly_breaks,active,photo,slot_interval) VALUES(?,?,?,?,?,?,?,?)',(sid,*vals));ids.append(cur.lastrowid)
                     if ids:c.execute('UPDATE staff SET active=0 WHERE shop_id=? AND id NOT IN ('+','.join('?' for _ in ids)+')',(sid,*ids))
                     else:c.execute('UPDATE staff SET active=0 WHERE shop_id=?',(sid,))
                 elif path=='/api/manage/time-off':
