@@ -106,7 +106,7 @@ def init_db():
     with connect() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, owner TEXT NOT NULL, created TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
-        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
+        CREATE TABLE IF NOT EXISTS shops(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL, city TEXT NOT NULL, address TEXT NOT NULL, phone TEXT NOT NULL, tagline TEXT DEFAULT '', photos TEXT NOT NULL DEFAULT '[]', public_hours TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved');
         CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT DEFAULT '', duration INTEGER NOT NULL, price INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, photo TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS staff(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, name TEXT NOT NULL, role TEXT DEFAULT 'Frizer', active INTEGER NOT NULL DEFAULT 1, weekly_schedule TEXT NOT NULL DEFAULT '{}', weekly_breaks TEXT NOT NULL DEFAULT '{}', photo TEXT NOT NULL DEFAULT '', slot_interval INTEGER NOT NULL DEFAULT 30 CHECK(slot_interval IN (15,30)));
         CREATE TABLE IF NOT EXISTS staff_time_off(id INTEGER PRIMARY KEY, shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE, staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE, kind TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, start_time TEXT, end_time TEXT, label TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
@@ -140,7 +140,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, expires TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS reviews_shop_created ON reviews(shop_id,created);
         ''')
-        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('services','photo',"TEXT NOT NULL DEFAULT ''"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_email_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_sms_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
+        for table, column, definition in [('shops','photos',"TEXT NOT NULL DEFAULT '[]'"),('shops','public_hours',"TEXT NOT NULL DEFAULT '{}'"),('shops','listing_enabled','INTEGER NOT NULL DEFAULT 1'),('shops','approval_status',"TEXT NOT NULL DEFAULT 'approved'"),('services','photo',"TEXT NOT NULL DEFAULT ''"),('bookings','reminder_at','TEXT'),('bookings','reminder_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_email_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','reminder_sms_sent','INTEGER NOT NULL DEFAULT 0'),('bookings','customer_id','INTEGER REFERENCES customers(id) ON DELETE SET NULL'),('bookings','price_at_booking','INTEGER'),('bookings','manage_token_hash','TEXT'),('payments','livemode','INTEGER NOT NULL DEFAULT 0'),('payments','paid_out_of_band','INTEGER NOT NULL DEFAULT 0'),('refunds','livemode','INTEGER NOT NULL DEFAULT 0'),('refunds','stripe_event_created','INTEGER NOT NULL DEFAULT 0')]:
             if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}:
                 c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
         if 'photo' not in {row['name'] for row in c.execute('PRAGMA table_info(staff)')}:
@@ -383,6 +383,15 @@ def validate_weekly_schedule(value):
         normalized[str(day_key)]=[[start.isoformat(timespec='minutes'),end.isoformat(timespec='minutes')] for start,end in checked]
     return normalized
 
+def opening_hours_specs(schedule):
+    day_names=('Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')
+    normalized=validate_weekly_schedule(decode_schedule(schedule))
+    specs=[]
+    for day_key,intervals in normalized.items():
+        for start,end in intervals:
+            specs.append({'@type':'OpeningHoursSpecification','dayOfWeek':f'https://schema.org/{day_names[int(day_key)]}','opens':start,'closes':end})
+    return specs
+
 def staff_slot_matches(c, staff, day, starts, finish):
     windows=schedule_windows(staff['weekly_schedule'],day)
     starts_clock=starts.replace(tzinfo=None).time();finish_clock=finish.replace(tzinfo=None).time()
@@ -445,7 +454,7 @@ def shop_public(c, shop):
     if not svc or not team: return None
     reviews=c.execute('SELECT rating,comment,created FROM reviews WHERE shop_id=? AND is_visible=1 ORDER BY created DESC LIMIT 20',(shop['id'],)).fetchall()
     rating=c.execute('SELECT COUNT(*) count,AVG(rating) average FROM reviews WHERE shop_id=? AND is_visible=1',(shop['id'],)).fetchone()
-    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':decode_schedule(x['weekly_schedule']),'weekly_breaks':decode_schedule(x['weekly_breaks'])} for x in team]}
+    return {'id':shop['id'],'name':shop['name'],'slug':shop['slug'],'city':shop['city'],'address':shop['address'],'phone':shop['phone'],'tagline':shop['tagline'],'photos':json.loads(shop['photos'] or '[]'),'public_hours':decode_schedule(shop['public_hours'] if 'public_hours' in shop.keys() else '{}'),'rating':round(rating['average'],1) if rating['average'] else None,'review_count':rating['count'],'reviews':[dict(x) for x in reviews],'services':[dict(x) for x in svc],'team':[{**dict(x),'weekly_schedule':decode_schedule(x['weekly_schedule']),'weekly_breaks':decode_schedule(x['weekly_breaks'])} for x in team]}
 
 def shop_next_availability(c, shop, days=14):
     """Return the earliest real slot, using the same schedule and collision rules as booking."""
@@ -728,6 +737,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             schema={'@context':'https://schema.org','@type':'HairSalon','name':public['name'],'url':canonical,'description':description,'telephone':public['phone'],'address':{'@type':'PostalAddress','streetAddress':public['address'],'addressLocality':public['city'],'addressCountry':'RO'},'inLanguage':'ro-RO'}
             shop_image=next((url for url in (public_image_url(x) for x in public.get('photos',[])) if url),'')
             if shop_image:schema['image']=shop_image
+            try:
+                hours_specs=opening_hours_specs(public.get('public_hours',{}))
+                if hours_specs:schema['openingHoursSpecification']=hours_specs
+            except (TypeError,ValueError):
+                pass
             offers=[]
             for item in public['services']:
                 service={'@type':'Service','name':item['name'],'serviceType':item['name'],'timeRequired':f"PT{int(item['duration'])}M",'provider':{'@type':'HairSalon','name':public['name'],'url':canonical}}
@@ -755,10 +769,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             team_html=''.join(team_rows)
             hero_html=f'<img class="seo-cover" src="{html_escape(shop_image,quote=True)}" alt="{html_escape(public["name"],quote=True)}">' if shop_image else ''
             rating_html=f'<p><strong>Evaluare: {public["rating"]}/5</strong> · {public["review_count"]} recenzii</p>' if public.get('rating') and public.get('review_count') else ''
+            day_labels=('Luni','Marți','Miercuri','Joi','Vineri','Sâmbătă','Duminică')
+            hours_rows=[]
+            for day_key in sorted(public.get('public_hours',{}),key=lambda x:int(x) if str(x).isdigit() else 99):
+                intervals=public['public_hours'].get(day_key,[])
+                if isinstance(intervals,list) and len(intervals)>=2 and all(isinstance(x,str) for x in intervals[:2]):intervals=[intervals]
+                if not isinstance(intervals,list):continue
+                times=[]
+                for interval in intervals:
+                    if isinstance(interval,dict):start,end=interval.get('start'),interval.get('end')
+                    elif isinstance(interval,(list,tuple)) and len(interval)==2:start,end=interval
+                    else:continue
+                    if start and end:times.append(f'{html_escape(str(start))}–{html_escape(str(end))}')
+                if times and str(day_key).isdigit() and 0<=int(day_key)<7:hours_rows.append(f'<li><strong>{day_labels[int(day_key)]}</strong>: {", ".join(times)}</li>')
+            hours_html=f'<h2>Programul frizeriei</h2><ul>{"".join(hours_rows)}</ul>' if hours_rows else ''
             fallback=(f'<main class="seo-fallback">{hero_html}<p class="seo-eyebrow">TUNSPRO · PROGRAMĂRI ONLINE</p><h1>{html_escape(public["name"])}</h1>'
                       f'<p>{html_escape(description)}</p><p>{html_escape(public["address"])}, {html_escape(public["city"])} · <a href="tel:{html_escape(public["phone"],quote=True)}">{html_escape(public["phone"])}</a></p>{rating_html}'
                       f'<a class="seo-primary" href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Alege serviciul și rezervă o oră →</a>'
-                      f'<h2>Servicii și prețuri</h2><ul style="list-style:none;padding:0">{services_html}</ul><h2>Echipa</h2><ul style="list-style:none;padding:0">{team_html}</ul>'
+                      f'{hours_html}<h2>Servicii și prețuri</h2><ul style="list-style:none;padding:0">{services_html}</ul><h2>Echipa</h2><ul style="list-style:none;padding:0">{team_html}</ul>'
                       f'<p><a href="/#frizerie/{urllib.parse.quote(slug,safe="")}">Vezi disponibilitatea și rezervă online</a></p></main>')
             page=page.replace('</head>',f'<style>{SEO_FALLBACK_STYLE}</style></head>',1)
             page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
@@ -956,6 +984,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     try:shop_data['photos']=json.loads(shop_data.get('photos') or '[]')
                     except (TypeError,ValueError):shop_data['photos']=[]
                     if not isinstance(shop_data['photos'],list):shop_data['photos']=[]
+                    shop_data['public_hours']=decode_schedule(shop_data.get('public_hours'))
                     notes={x['client_key']:x['note'] for x in c.execute('SELECT client_key,note FROM client_notes WHERE shop_id=?',(shop['id'],)).fetchall()} if paid else {}
                     booking_data=[]
                     if paid:
@@ -1062,6 +1091,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     for url in removed_photos:
                         name=url.rsplit('/',1)[-1]
                         if re.fullmatch(r'[0-9a-f]{32}\.(?:jpg|png|webp)',name):(MEDIA_DIR/name).unlink(missing_ok=True)
+                elif path=='/api/manage/shop-hours':
+                    schedule=data.get('schedule',{})
+                    if isinstance(schedule,str):
+                        try:schedule=json.loads(schedule)
+                        except (TypeError,ValueError):return self.json_response(400,{'error':'Verifică programul frizeriei.'})
+                    normalized=validate_weekly_schedule(schedule)
+                    c.execute('UPDATE shops SET public_hours=? WHERE id=?',(json.dumps(normalized),sid))
                 elif path=='/api/manage/services':
                     ids=[]
                     for x in data.get('services',[]):
@@ -1797,3 +1833,4 @@ if __name__=='__main__':
     threading.Thread(target=reminder_loop,daemon=True).start()
     print(f'TunsPro running at http://localhost:{PORT}')
     http.server.ThreadingHTTPServer(('0.0.0.0',PORT),Handler).serve_forever()
+
