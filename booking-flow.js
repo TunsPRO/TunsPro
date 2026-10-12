@@ -152,7 +152,7 @@
   },true);
   const app=document.querySelector('#app');
   if(app){
-    new MutationObserver(scheduleUpdate).observe(app,{childList:true,subtree:true,attributes:true,attributeFilter:['class','value','aria-pressed']});
+    new MutationObserver(records=>{const relevant=records.some(record=>{const target=record.target.nodeType===1?record.target:record.target.parentElement;return !target?.closest('.booking-continue-bar,[data-booking-progress]')});if(relevant)scheduleUpdate()}).observe(app,{childList:true,subtree:true,attributes:true,attributeFilter:['class','value','aria-pressed']});
     scheduleUpdate();
   }
 })();
