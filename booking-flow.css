@@ -1,0 +1,58 @@
+/* Guided booking flow and final review */
+.booking-flow-progress{
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;
+  margin:12px 0 16px;padding:9px;border:1px solid var(--line);
+  border-radius:14px;background:#fff;box-shadow:0 5px 18px #17191608
+}
+.booking-flow-progress button{
+  min-width:0;min-height:48px;display:flex;align-items:center;justify-content:center;gap:7px;
+  padding:7px 9px;border:1px solid transparent;border-radius:10px;background:transparent;
+  color:var(--muted);font:600 12px 'DM Sans',sans-serif;cursor:pointer
+}
+.booking-flow-progress button.is-current{border-color:#d7f16b;background:#f8fbe9;color:var(--ink)}
+.booking-flow-progress button.is-complete{color:#536348}
+.booking-flow-index{
+  width:25px;height:25px;flex:none;display:grid;place-items:center;border-radius:50%;
+  background:#f0f1eb;color:#73786d;font:700 11px Manrope,sans-serif
+}
+.booking-flow-progress button.is-current .booking-flow-index{background:var(--lime);color:var(--ink)}
+.booking-flow-progress button.is-complete .booking-flow-index{background:#e9f0d8;color:#536348}
+.booking-flow-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.booking-flow-progress button:focus-visible,.booking-continue-button:focus-visible{
+  outline:3px solid #91a34e;outline-offset:2px
+}
+.booking-continue-bar{padding-bottom:max(13px,env(safe-area-inset-bottom))}
+.booking-continue-button{min-height:48px;white-space:normal}
+.booking-continue-button:disabled{opacity:1;cursor:pointer}
+.booking-review-dialog{
+  width:min(480px,calc(100vw - 28px));max-width:none;max-height:min(88vh,760px);
+  padding:0;border:1px solid var(--line);border-radius:20px;background:var(--paper);
+  color:var(--ink);box-shadow:0 24px 90px #0005
+}
+.booking-review-dialog::backdrop{background:#10120fb8;backdrop-filter:blur(3px)}
+.booking-review-content{padding:25px}
+.booking-review-kicker{color:#74834a;font-size:10px;font-weight:800;letter-spacing:.14em}
+.booking-review-content h2{margin:9px 0;font:800 25px Manrope,sans-serif;letter-spacing:-.04em}
+.booking-review-intro{margin:0 0 17px;color:var(--muted);font-size:13px;line-height:1.5}
+.booking-review-details{margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:13px;background:#fff}
+.booking-review-row{display:grid;grid-template-columns:100px minmax(0,1fr);gap:10px;padding:9px 0;border-bottom:1px solid #eff0eb;font-size:13px}
+.booking-review-row:last-child{border-bottom:0}
+.booking-review-row dt{color:var(--muted)}
+.booking-review-row dd{margin:0;text-align:right;font-weight:700;overflow-wrap:anywhere}
+.booking-review-actions{display:grid;grid-template-columns:1fr 1.15fr;gap:9px;margin-top:16px}
+.booking-review-actions .btn{min-height:48px;padding:11px;font-size:13px}
+@media(max-width:680px){
+  .booking-flow-progress{gap:3px;margin:9px 0 12px;padding:5px;border-radius:12px}
+  .booking-flow-progress button{min-height:46px;gap:5px;padding:5px 3px;font-size:10px}
+  .booking-flow-index{width:23px;height:23px}
+  .booking-flow-label{max-width:100%;font-size:10px}
+  .booking-continue-bar{bottom:0;padding-bottom:max(12px,env(safe-area-inset-bottom));grid-template-columns:minmax(0,1fr) auto;gap:7px 10px}
+  .booking-continue-copy{grid-column:1;grid-row:1}
+  .booking-continue-price{grid-column:2;grid-row:1;font-size:15px}
+  .booking-continue-button{grid-column:1/-1;grid-row:2;width:100%;min-height:48px}
+  .booking-review-content{padding:20px 17px}
+  .booking-review-content h2{font-size:23px}
+  .booking-review-row{grid-template-columns:83px minmax(0,1fr);font-size:12px}
+  .booking-review-actions{grid-template-columns:1fr}
+}
+@media(prefers-reduced-motion:reduce){.booking-flow-progress,.booking-review-dialog{scroll-behavior:auto}}
