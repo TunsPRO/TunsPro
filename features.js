@@ -475,7 +475,7 @@ const servicePhotoObserver=new MutationObserver(()=>{if(!publicShop?.services)re
   const baseShell = dashboardShell;
   dashboardShell = function(content, active){
     const html = baseShell(content, active);
-    const links = Array.from(html.matchAll(/<a class="side-link(?: active)?" href="#([^"]+)">([\s\S]*?)<\/a>/g));
+    const links = Array.from(html.matchAll(/<a class="side-link(?: active)?\s*" href="#([^"]+)">([\s\S]*?)<\/a>/g));
     const selected = links.find(item => item[1] === active);
     const selectedLabel = selected && selected[2].match(/<span class="label">([^<]+)<\/span>/);
     const mobileNav = '<details class="mobile-dashboard-menu"><summary><span class="mobile-dashboard-menu-title"><span aria-hidden="true">☰</span> Secțiuni</span><strong>' + esc(selectedLabel ? selectedLabel[1] : 'Dashboard') + '</strong><span class="mobile-dashboard-chevron" aria-hidden="true">⌄</span></summary><nav aria-label="Navigare dashboard">' +
