@@ -681,3 +681,112 @@
   .booking-review-actions{grid-template-columns:1fr}
 }
 @media(prefers-reduced-motion:reduce){.booking-flow-progress,.booking-review-dialog{scroll-behavior:auto}}
+
+/* Barber dashboard refinements for desktop, tablet and mobile. */
+.dashboard .dash-main{min-width:0}
+.mobile-dashboard-menu{display:none}
+.dashboard-agenda-stats .stat{min-width:0}
+.dashboard-agenda-stats .stat strong{font-variant-numeric:tabular-nums}
+.next-appointment-card{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 18px;padding:18px 20px;border:1px solid #dfe7c8;border-radius:14px;background:linear-gradient(115deg,#fbfcf5,#fff)}
+.next-appointment-card>div{display:grid;gap:6px;min-width:0}
+.next-appointment-card .eyebrow{font-size:9px;color:#68764d}
+.next-appointment-card>div>strong{font:700 16px Manrope;letter-spacing:-.025em}
+.next-appointment-card small{color:var(--muted);font-size:12px;line-height:1.5}
+.next-appointment-empty{border-color:var(--line);background:#fff}
+.agenda-controls{display:grid;gap:12px;margin-bottom:18px}
+.agenda-period-switch{display:flex;gap:7px;flex-wrap:wrap}
+.agenda-period-switch .filter-btn{min-height:40px;padding:9px 14px;font-size:12px}
+.agenda-filterbar{display:grid;grid-template-columns:minmax(150px,.8fr) minmax(150px,.8fr) minmax(220px,1.4fr);align-items:end;gap:12px}
+.agenda-filter-label{min-width:0}
+.agenda-filter-label .input{width:100%;min-height:44px;font-size:13px}
+.agenda-search-label{min-width:0}
+.barber-agendas-head{display:flex;justify-content:space-between;align-items:end;gap:14px;margin:20px 0 12px}
+.barber-agendas-head>div{display:grid;gap:5px}
+.barber-agendas-head h2{font:700 19px Manrope;letter-spacing:-.04em;margin:0}
+.barber-agendas-head small{color:var(--muted);font-size:11px}
+.barber-agenda.panel{overflow:hidden}
+.barber-agenda-head small{font-size:11px}
+.barber-appointment{grid-template-columns:minmax(100px, .55fr) minmax(160px,1.1fr) minmax(150px,1fr) auto}
+.booking-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.booking-actions .btn,.booking-actions .filter-btn{min-height:40px;padding:9px 13px;font-size:11px}
+.booking-status-confirmed{display:inline-block;margin-top:5px;color:#637449;font-size:9px;font-style:normal;font-weight:700;letter-spacing:.03em}
+.barber-appointment[data-booking-status="pending"]{background:linear-gradient(90deg,#fffdf8,#fff)}
+.past-bookings-panel{margin-top:18px}
+.past-bookings-panel .panel-head{align-items:flex-start}
+.past-bookings-panel .panel-head>div{display:grid;gap:5px}
+.past-bookings-panel .panel-head small{color:var(--muted);font-size:11px;line-height:1.5}
+.dashboard .filter-btn:focus-visible,.dashboard .btn:focus-visible,.dashboard input:focus-visible,.dashboard select:focus-visible,.mobile-dashboard-menu summary:focus-visible{outline:3px solid #d7f16b;outline-offset:2px}
+@media(max-width:900px) and (min-width:681px){
+  .dash-layout{grid-template-columns:178px minmax(0,1fr)}
+  .dash-main{padding:22px 18px 48px}
+  .sidebar{padding:20px 12px}
+  .sidebar .brand{margin:2px 5px 32px}
+  .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .agenda-filterbar{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .agenda-search-label{grid-column:1/-1}
+  .barber-appointment{grid-template-columns:86px minmax(0,1fr) minmax(0,1fr)}
+  .barber-appointment .booking-actions{grid-column:2/-1;justify-content:flex-start}
+}
+@media(max-width:680px){
+  .dash-layout{display:block;min-height:100dvh}
+  .sidebar{position:sticky;top:0;z-index:30;height:auto;min-height:58px;padding:6px 14px;display:flex;flex-direction:row;align-items:center;justify-content:space-between;background:#fff;border:0;border-bottom:1px solid var(--line)}
+  .sidebar .brand{margin:0;gap:7px}
+  .sidebar .brand-symbol{width:38px;height:38px}
+  .sidebar .brand-word{font-size:20px}
+  .sidebar .brand-word small{font-size:6px;letter-spacing:1.5px;margin-top:4px}
+  .sidebar .plan-badge{margin:0 0 0 auto;padding:7px 10px;font-size:9px}
+  .sidebar .side-label,.sidebar .side-bottom,.sidebar>nav,.sidebar>.side-link{display:none!important}
+  .mobile-dashboard-menu{display:block;position:sticky;top:58px;z-index:29;background:#fff;border-bottom:1px solid var(--line)}
+  .mobile-dashboard-menu summary{min-height:47px;display:flex;align-items:center;gap:9px;padding:7px 14px;list-style:none;cursor:pointer}
+  .mobile-dashboard-menu summary::-webkit-details-marker{display:none}
+  .mobile-dashboard-menu-title{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:11px;font-weight:700}
+  .mobile-dashboard-menu summary>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .mobile-dashboard-chevron{margin-left:auto;color:var(--muted);font-size:17px}
+  .mobile-dashboard-menu[open] .mobile-dashboard-chevron{transform:rotate(180deg)}
+  .mobile-dashboard-menu>nav{position:absolute;top:calc(100% + 1px);left:10px;right:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;max-height:calc(100dvh - 125px);overflow:auto;padding:10px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 18px 40px #17191626}
+  .mobile-dashboard-link{display:flex;align-items:center;gap:8px;min-width:0;min-height:46px;padding:9px 10px;border:1px solid transparent;border-radius:10px;color:#565a52;font-size:11px}
+  .mobile-dashboard-link .ico{flex:0 0 20px;width:20px;text-align:center;font-size:15px}
+  .mobile-dashboard-link .label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mobile-dashboard-link.active{background:#f1f3e8;border-color:#e3e8d3;color:var(--ink);font-weight:700}
+  .dash-main{padding:18px 14px calc(34px + env(safe-area-inset-bottom));max-width:none}
+  .dash-top{align-items:flex-start;gap:12px;margin-bottom:20px;flex-direction:column}
+  .dash-top h1{font-size:25px;line-height:1.15}
+  .dash-top p{font-size:12px;line-height:1.55}
+  .dash-top .page-link{font-size:12px}
+  .dashboard-agenda-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:14px}
+  .dashboard-agenda-stats .stat{padding:12px}
+  .dashboard-agenda-stats .stat-top{font-size:10px;line-height:1.3}
+  .dashboard-agenda-stats .stat strong{font-size:23px;margin:8px 0 2px}
+  .dashboard-agenda-stats .stat small{font-size:9px;line-height:1.4}
+  .next-appointment-card{align-items:flex-start;flex-direction:column;padding:14px;gap:12px}
+  .next-appointment-card>div>strong{font-size:14px;line-height:1.4}
+  .next-appointment-card small{font-size:11px}
+  .agenda-controls{gap:9px}
+  .agenda-period-switch{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+  .agenda-period-switch .filter-btn{min-height:44px;padding:9px 7px;font-size:11px}
+  .agenda-filterbar{display:grid;grid-template-columns:1fr;gap:10px;padding:12px}
+  .agenda-filter-label{font-size:11px}
+  .agenda-filter-label .input{min-height:46px;font-size:14px}
+  .barber-agendas-head{align-items:flex-start;margin:18px 0 10px}
+  .barber-agendas-head h2{font-size:18px}
+  .barber-agendas-head>a{font-size:11px;white-space:nowrap}
+  .barber-agenda.panel{padding:0}
+  .barber-agenda-head{padding:13px 14px;margin-bottom:0}
+  .barber-appointments{padding:0 13px}
+  .barber-appointment{grid-template-columns:68px minmax(0,1fr);gap:8px 10px;padding:13px 0}
+  .barber-appointment-when{grid-column:1;grid-row:1/3;align-self:start}
+  .barber-appointment-client{grid-column:2;grid-row:1;min-width:0}
+  .barber-appointment-service{grid-column:2;grid-row:2;min-width:0}
+  .barber-appointment-client small{overflow-wrap:anywhere}
+  .barber-appointment .booking-actions{grid-column:1/-1;grid-row:3;display:flex;justify-content:flex-end;gap:7px;padding-top:3px}
+  .booking-actions .btn,.booking-actions .filter-btn{flex:1;min-height:42px;font-size:11px}
+  .barber-appointment-when strong{font-size:17px}
+  .barber-appointment-when span{font-size:10px}
+  .barber-appointment-service strong,.barber-appointment-client strong{font-size:12px}
+  .barber-appointment-service small,.barber-appointment-client small{font-size:10px}
+  .barber-agenda-empty{padding:14px;font-size:11px}
+  .barber-agenda-empty-state{display:grid;gap:12px;justify-items:start}
+  .past-bookings-panel{padding:14px}
+  .past-bookings-panel .manage-row{align-items:flex-start;flex-direction:column}
+  .past-bookings-panel .manage-row .btn{width:100%;min-height:44px}
+}

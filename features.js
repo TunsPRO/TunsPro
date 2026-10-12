@@ -470,4 +470,135 @@ const servicePhotoObserver=new MutationObserver(()=>{if(!publicShop?.services)re
     new MutationObserver(records=>{const relevant=records.some(record=>{const target=record.target.nodeType===1?record.target:record.target.parentElement;return !target?.closest('.booking-continue-bar,[data-booking-progress]')});if(relevant)scheduleUpdate()}).observe(app,{childList:true,subtree:true,attributes:true,attributeFilter:['class','value','aria-pressed']});
     scheduleUpdate();
   }
+})();/* Responsive barber dashboard: labelled mobile navigation and a flexible appointment calendar. */
+(function(){
+  const baseShell = dashboardShell;
+  dashboardShell = function(content, active){
+    const html = baseShell(content, active);
+    const links = Array.from(html.matchAll(/<a class="side-link(?: active)?" href="#([^"]+)">([\s\S]*?)<\/a>/g));
+    const selected = links.find(item => item[1] === active);
+    const selectedLabel = selected && selected[2].match(/<span class="label">([^<]+)<\/span>/);
+    const mobileNav = '<details class="mobile-dashboard-menu"><summary><span class="mobile-dashboard-menu-title"><span aria-hidden="true">☰</span> Secțiuni</span><strong>' + esc(selectedLabel ? selectedLabel[1] : 'Dashboard') + '</strong><span class="mobile-dashboard-chevron" aria-hidden="true">⌄</span></summary><nav aria-label="Navigare dashboard">' +
+      links.map(item => '<a class="mobile-dashboard-link' + (item[1] === active ? ' active' : '') + '" href="#' + esc(item[1]) + '">' + item[2] + '</a>').join('') +
+      '</nav></details>';
+    return html.replace('</aside><main class="dash-main">', '</aside>' + mobileNav + '<main class="dash-main">');
+  };
+
+  const setupPage = appointmentPage;
+  appointmentPage = function(){
+    if(!dash.subscription.active) return setupPage();
+    const filters = window.tunsproAgendaFilters || (window.tunsproAgendaFilters = {date:'',barber:'all',view:'week',search:''});
+    if(!filters.view) filters.view = 'week';
+    if(filters.search === undefined) filters.search = '';
+    const now = new Date();
+    const today = localDayKey(now);
+    const tomorrowDate = new Date(now);
+    tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+    const tomorrow = localDayKey(tomorrowDate);
+    const dayStart = value => {
+      const parts = String(value).split('-').map(Number);
+      return new Date(parts[0], parts[1] - 1, parts[2]);
+    };
+    const anchor = dayStart(filters.date || today);
+    let rangeStart = null, rangeEnd = null;
+    if(filters.view === 'day'){
+      rangeStart = new Date(anchor);
+      rangeEnd = new Date(anchor); rangeEnd.setDate(rangeEnd.getDate() + 1);
+    } else if(filters.view === 'week'){
+      rangeStart = new Date(anchor);
+      rangeStart.setDate(rangeStart.getDate() - ((rangeStart.getDay() + 6) % 7));
+      rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeEnd.getDate() + 7);
+    } else if(filters.view === 'month'){
+      rangeStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+      rangeEnd = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1);
+    }
+    const upcoming = (dash.bookings || []).filter(b => ['pending','confirmed'].includes(b.status) && new Date(b.starts) >= now).sort((a,b) => new Date(a.starts) - new Date(b.starts));
+    const pending = upcoming.filter(b => b.status === 'pending');
+    const todayBookings = upcoming.filter(b => localDayKey(b.starts) === today);
+    const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
+    const nextSevenDays = upcoming.filter(b => new Date(b.starts) < weekEnd);
+    const past = (dash.bookings || []).filter(b => b.status === 'confirmed' && new Date(b.ends) < now).sort((a,b) => new Date(b.ends) - new Date(a.ends));
+    const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    const search = normalize(filters.search);
+    const filtered = upcoming.filter(b => {
+      const start = new Date(b.starts);
+      const inRange = !rangeStart || (start >= rangeStart && start < rangeEnd);
+      const matchesBarber = filters.barber === 'all' || String(b.staff_id) === String(filters.barber);
+      const matchesSearch = !search || normalize([b.client,b.phone,b.email,b.service_name,b.staff_name].join(' ')).includes(search);
+      return inRange && matchesBarber && matchesSearch;
+    });
+    const barbers = (dash.team || []).filter(t => t.active);
+    const groups = barbers.filter(t => filters.barber === 'all' || String(t.id) === String(filters.barber)).map(t => ({
+      id:Number(t.id), name:t.name, bookings:filtered.filter(b => Number(b.staff_id) === Number(t.id))
+    }));
+    const known = new Set(barbers.map(t => Number(t.id)));
+    filtered.forEach(b => {
+      if(!known.has(Number(b.staff_id))){
+        let group = groups.find(g => g.id === Number(b.staff_id));
+        if(!group){ group = {id:Number(b.staff_id),name:b.staff_name,bookings:[]}; groups.push(group); }
+        group.bookings.push(b);
+      }
+    });
+    const barberSections = groups.map(g => {
+      const rows = g.bookings.map(b => {
+        const dateLabel = new Date(b.starts).toLocaleDateString('ro-RO',{weekday:'short',day:'2-digit',month:'short',timeZone:'Europe/Bucharest'});
+        const timeLabel = new Date(b.starts).toLocaleTimeString('ro-RO',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Bucharest'});
+        return '<article class="barber-appointment" data-booking-status="' + esc(b.status) + '">' +
+          '<div class="barber-appointment-when"><strong>' + timeLabel + '</strong><span>' + dateLabel + '</span>' + (b.status === 'pending' ? '<em class="booking-status-pending">În așteptare</em>' : '<em class="booking-status-confirmed">Confirmată</em>') + '</div>' +
+          '<div class="barber-appointment-client"><strong>' + esc(b.client) + '</strong><small>' + esc(b.phone) + (b.email ? ' · ' + esc(b.email) : '') + '</small></div>' +
+          '<div class="barber-appointment-service"><strong>' + esc(b.service_name) + '</strong><small>' + esc(b.price) + ' lei · ' + esc(b.duration) + ' min</small></div>' +
+          '<div class="booking-actions">' + (b.status === 'pending' ? '<button class="btn" data-confirm-booking="' + Number(b.id) + '" aria-label="Confirmă programarea lui ' + esc(b.client) + '">Confirmă</button>' : '') +
+          '<button class="filter-btn" data-cancel="' + Number(b.id) + '" aria-label="Anulează programarea lui ' + esc(b.client) + '">Anulează</button></div></article>';
+      }).join('');
+      return '<section class="panel barber-agenda"><div class="panel-head barber-agenda-head"><div><h2>' + esc(g.name) + '</h2><small>' + g.bookings.length + (g.bookings.length === 1 ? ' programare' : ' programări') + ' în interval</small></div><span class="pill">FRIZER</span></div>' +
+        (rows ? '<div class="barber-appointments">' + rows + '</div>' : '<p class="barber-agenda-empty">Nu are programări în intervalul selectat.</p>') + '</section>';
+    }).join('');
+    const subscriptionState = dash.subscription.status === 'past_due' && dash.subscription.active ? 'În perioada de grație' : 'Activ';
+    const selectedDate = filters.date || today;
+    const periodLabel = filters.view === 'day' ? 'ziua aleasă' : filters.view === 'month' ? 'luna aleasă' : filters.view === 'all' ? 'toate datele' : 'săptămâna aleasă';
+    const nextBooking = upcoming[0];
+    const nextCard = nextBooking ?
+      '<section class="next-appointment-card"><div><span class="eyebrow">URMĂTOAREA PROGRAMARE</span><strong>' + new Date(nextBooking.starts).toLocaleTimeString('ro-RO',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Bucharest'}) + ' · ' + new Date(nextBooking.starts).toLocaleDateString('ro-RO',{weekday:'long',day:'numeric',month:'long',timeZone:'Europe/Bucharest'}) + '</strong><small>' + esc(nextBooking.client) + ' · ' + esc(nextBooking.service_name) + ' · ' + esc(nextBooking.staff_name) + '</small></div><span class="pill">' + (nextBooking.status === 'pending' ? 'AȘTEAPTĂ CONFIRMAREA' : 'CONFIRMATĂ') + '</span></section>' :
+      '<section class="next-appointment-card next-appointment-empty"><div><span class="eyebrow">AGENDA TA</span><strong>Nu ai programări viitoare.</strong><small>Verifică o altă perioadă sau distribuie profilul public clienților.</small></div><a class="page-link" href="/frizerie/' + encodeURIComponent(dash.shop.slug) + '">Vezi profilul →</a></section>';
+    const pastRows = past.map(b => '<article class="manage-row"><div><strong>' + esc(b.client) + ' · ' + esc(b.service_name) + '</strong><small>' + new Date(b.starts).toLocaleDateString('ro-RO',{weekday:'short',day:'numeric',month:'short',timeZone:'Europe/Bucharest'}) + ' · ' + esc(b.staff_name) + '</small></div><button class="btn" data-complete-booking="' + Number(b.id) + '">Marchează încheiată</button></article>').join('');
+    return dashboardShell(
+      '<div class="dash-top"><div><h1>Calendarul echipei</h1><p>Programări, confirmări și disponibilitate pentru ' + esc(dash.shop.name) + '.</p></div><a class="page-link" href="/frizerie/' + encodeURIComponent(dash.shop.slug) + '">↗ Vezi profilul public</a></div>' +
+      '<section class="stat-grid dashboard-agenda-stats"><article class="stat"><div class="stat-top">Astăzi</div><strong>' + todayBookings.length + '</strong><small>' + todayBookings.filter(b => b.status === 'pending').length + ' în așteptarea confirmării</small></article>' +
+      '<article class="stat"><div class="stat-top">De confirmat</div><strong>' + pending.length + '</strong><small>Programări viitoare</small></article>' +
+      '<article class="stat"><div class="stat-top">Următoarele 7 zile</div><strong>' + nextSevenDays.length + '</strong><small>' + filtered.length + ' în ' + periodLabel + '</small></article>' +
+      '<article class="stat"><div class="stat-top">De încheiat</div><strong>' + past.length + '</strong><small>Servicii trecute, încă neîncheiate</small></article></section>' +
+      nextCard +
+      '<section class="agenda-controls" aria-label="Filtre calendar"><div class="agenda-period-switch" role="group" aria-label="Perioada calendarului">' +
+      '<button class="filter-btn ' + (filters.view === 'day' ? 'active' : '') + '" data-agenda-view="day" aria-pressed="' + (filters.view === 'day') + '">Ziua aleasă</button>' +
+      '<button class="filter-btn ' + (filters.view === 'week' ? 'active' : '') + '" data-agenda-view="week" aria-pressed="' + (filters.view === 'week') + '">Săptămâna</button>' +
+      '<button class="filter-btn ' + (filters.view === 'month' ? 'active' : '') + '" data-agenda-view="month" aria-pressed="' + (filters.view === 'month') + '">Luna</button>' +
+      '<button class="filter-btn ' + (filters.view === 'all' ? 'active' : '') + '" data-agenda-view="all" aria-pressed="' + (filters.view === 'all') + '">Toate</button></div>' +
+      '<div class="agenda-filterbar"><label class="agenda-filter-label">Data de referință<input class="input" type="date" id="agenda-date" min="' + today + '" value="' + esc(selectedDate) + '"></label>' +
+      '<label class="agenda-filter-label">Frizer<select class="input" id="agenda-barber"><option value="all"' + (filters.barber === 'all' ? ' selected' : '') + '>Toată echipa</option>' +
+      barbers.map(t => '<option value="' + Number(t.id) + '"' + (String(filters.barber) === String(t.id) ? ' selected' : '') + '>' + esc(t.name) + '</option>').join('') + '</select></label>' +
+      '<label class="agenda-filter-label agenda-search-label">Caută programare<input class="input" type="search" data-agenda-search value="' + esc(filters.search) + '" placeholder="Client, telefon sau serviciu" autocomplete="off"></label></div></section>' +
+      '<div class="barber-agendas-head"><div><h2>Agenda echipei</h2><small>' + filtered.length + (filtered.length === 1 ? ' programare' : ' programări') + ' · ' + periodLabel + '</small></div><a href="#dashboard-clients">Vezi clienții →</a></div>' +
+      (barberSections || '<section class="panel barber-agenda-empty-state"><strong>Nu există frizeri activi în echipă.</strong><a class="btn" href="#dashboard-team">Configurează echipa</a></section>') +
+      '<section class="panel past-bookings-panel"><div class="panel-head"><div><h2>Programări de încheiat</h2><small>Serviciile trecute rămân confirmate până le marchezi ca încheiate.</small></div></div><div class="manage-list">' + (pastRows || '<p class="manage-note">Nu ai programări restante de încheiat.</p>') + '</div></section>',
+      'dashboard'
+    );
+  };
+
+  app.addEventListener('click', e => {
+    const period = e.target.closest('[data-agenda-view]');
+    if(!period) return;
+    const filters = window.tunsproAgendaFilters || (window.tunsproAgendaFilters = {date:'',barber:'all',view:'week',search:''});
+    filters.view = period.dataset.agendaView;
+    app.innerHTML = appointmentPage();
+  });
+  app.addEventListener('input', e => {
+    if(!e.target.matches('[data-agenda-search]')) return;
+    const input = e.target;
+    const cursor = input.selectionStart;
+    const filters = window.tunsproAgendaFilters || (window.tunsproAgendaFilters = {date:'',barber:'all',view:'week',search:''});
+    filters.search = input.value;
+    app.innerHTML = appointmentPage();
+    const replacement = app.querySelector('[data-agenda-search]');
+    if(replacement){ replacement.focus(); if(typeof cursor === 'number') replacement.setSelectionRange(cursor,cursor); }
+  });
 })();
