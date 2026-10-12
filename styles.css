@@ -503,3 +503,54 @@
 }
 .shop-hours-panel{margin-bottom:16px}.shop-hours-form .schedule-edit-grid{margin-bottom:18px}.shop-hours-day{grid-template-columns:minmax(125px,.55fr) minmax(260px,1.45fr)}.shop-hours-day .schedule-work-window{grid-template-columns:repeat(2,minmax(0,1fr));max-width:560px}.public-hours-card{display:grid;grid-template-columns:minmax(190px,.8fr) minmax(240px,1.2fr);gap:22px;margin:22px 0;padding:22px 24px;border:1px solid var(--line);border-radius:18px;background:#fff}.public-hours-card h2{margin:5px 0 7px;font-size:20px}.public-hours-card p{margin:0;color:var(--muted);font-size:13px;line-height:1.6}.public-hours-list{display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;align-content:center}.public-hours-row{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12px}.public-hours-row strong{color:var(--ink)}.public-hours-row span{color:var(--muted);text-align:right}@media(max-width:700px){.shop-hours-day{grid-template-columns:1fr}.public-hours-card{grid-template-columns:1fr;padding:17px}.public-hours-list{grid-template-columns:1fr}}
 
+
+
+/* Responsive service + availability booking layout, aligned with TunsPro branding */
+.booking-profile-page{padding-bottom:150px;scroll-padding-bottom:120px}
+.booking-profile-page .salon-hero{display:flex;align-items:center;justify-content:flex-start;gap:22px}
+.booking-shop-mark{width:92px;height:92px;flex:0 0 92px;display:grid;place-items:center;overflow:hidden;border:2px solid #d6b372;border-radius:50%;background:#d7f16b;color:#171916;font-size:36px;font-weight:800}
+.booking-shop-mark img{width:100%;height:100%;object-fit:cover}
+.booking-selector-layout{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(300px,.98fr);gap:14px;align-items:start}
+.booking-service-column{display:grid;gap:14px;align-content:start;min-width:0}
+.booking-availability-column{min-width:0;align-self:stretch}
+.booking-availability-column .booking-date-options{grid-template-columns:repeat(4,minmax(0,1fr))}
+.booking-availability-column .booking-date-option{min-height:66px}
+.booking-availability-column .booking-time-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.booking-hours-summary .hours-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}
+.booking-continue-bar{position:fixed;z-index:45;left:50%;bottom:12px;transform:translateX(-50%);width:min(calc(100% - 32px),1180px);display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:20px;padding:13px 16px;border:1px solid #e4e7dc;border-radius:16px;background:#fff;color:var(--ink);box-shadow:0 12px 38px #17191628}
+.booking-continue-copy{min-width:0;display:grid;gap:3px}
+.booking-continue-copy>span{font-size:9px;font-weight:850;letter-spacing:.13em;color:#788747}
+.booking-continue-copy>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.booking-continue-copy>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px}
+.booking-continue-price{white-space:nowrap;font:800 19px Manrope;color:#99713e}
+.booking-continue-button{min-width:148px;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:12px;border-radius:11px;text-decoration:none}
+.booking-continue-button.is-disabled{opacity:.58;cursor:default;pointer-events:none}
+#booking-form{scroll-margin-top:30px;scroll-margin-bottom:120px}
+@media(max-width:1050px){.booking-selector-layout{grid-template-columns:minmax(0,1fr) minmax(275px,.92fr);gap:11px}.booking-step-section{padding:18px}}
+@media(max-width:850px){.booking-profile-page .salon-grid{grid-template-columns:1fr}.booking-selector-layout{grid-template-columns:minmax(0,1fr) minmax(280px,.9fr)}.booking-final-card{position:static;order:initial}}
+@media(max-width:680px){
+  .booking-profile-page{padding-bottom:145px;padding-top:12px}
+  .booking-profile-page .salon-hero{align-items:flex-start;gap:13px;padding:18px 15px}
+  .booking-shop-mark{width:58px;height:58px;flex-basis:58px;font-size:25px}
+  .booking-profile-page .salon-identity{min-width:0}
+  .booking-profile-page .salon-identity h1{font-size:25px;overflow-wrap:anywhere}
+  .booking-profile-page .salon-meta{display:grid;gap:6px;font-size:11px}
+  .booking-profile-page .salon-meta span{overflow-wrap:anywhere}
+  .booking-profile-page .profile-contact-links{gap:8px 12px;font-size:11px}
+  .booking-selector-layout{grid-template-columns:1fr;gap:11px}
+  .booking-service-column{gap:11px}
+  .booking-availability-column .booking-date-options{display:flex;gap:7px;overflow-x:auto;padding:1px 1px 7px;scroll-snap-type:x mandatory;scrollbar-width:thin}
+  .booking-availability-column .booking-date-option{flex:0 0 55px;min-height:66px;scroll-snap-align:start}
+  .booking-availability-column .booking-time-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .booking-hours-summary .hours-list{grid-template-columns:1fr}
+  .booking-continue-bar{bottom:0;width:100%;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;padding:10px 14px calc(10px + env(safe-area-inset-bottom));border-radius:16px 16px 0 0}
+  .booking-continue-copy>span{font-size:8px}
+  .booking-continue-copy>strong{font-size:12px}
+  .booking-continue-copy>small{font-size:10px}
+  .booking-continue-price{font-size:15px}
+  .booking-continue-button{grid-column:1/-1;width:100%;min-height:44px}
+  #booking-form{scroll-margin-bottom:150px}
+}
+@media(prefers-reduced-motion:reduce){.booking-continue-bar{scroll-behavior:auto}}
+
+.booking-continue-button:disabled{opacity:.58;cursor:not-allowed}
