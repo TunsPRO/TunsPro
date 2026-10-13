@@ -835,3 +835,15 @@
   .past-bookings-panel .manage-row .btn{width:100%;min-height:44px}
 }
 
+
+.setup-next-action{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:15px 18px;border:1px solid #dce6bd;border-radius:13px;background:#f8fbe9;color:var(--ink);text-decoration:none;transition:transform .16s,border-color .16s}
+.setup-next-action:hover,.setup-next-action:focus-visible{transform:translateY(-1px);border-color:#bacb75;outline:3px solid #d7f16b66;outline-offset:2px}
+.setup-next-action span{display:grid;gap:3px}.setup-next-action small{color:#687741;font-size:11px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}.setup-next-action strong{font-size:14px}.setup-next-action>b{display:grid;place-items:center;flex:0 0 34px;width:34px;height:34px;border-radius:50%;background:var(--lime);font-size:19px}
+.setup-publish-status,.schedule-mismatch-notice{display:flex;align-items:flex-start;gap:12px;margin:0 0 14px;padding:15px 17px;border:1px solid var(--line);border-radius:13px;background:#fff}
+.setup-publish-status>div{min-width:0;flex:1}.setup-publish-status strong,.schedule-mismatch-notice strong{font-size:13px}.setup-publish-status p,.schedule-mismatch-notice p{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.55}
+.setup-publish-status>a{margin-left:auto;white-space:nowrap;color:#687741;font-size:12px;font-weight:700;text-decoration:none}
+.setup-publish-icon{display:grid;place-items:center;flex:0 0 26px;width:26px;height:26px;border-radius:50%;background:#eff0e9;color:#4d6032;font-weight:800}
+.setup-publish-status.pending{border-color:#ead9aa;background:#fffcf3}.setup-publish-status.pending .setup-publish-icon{background:#f8e9bd}
+.setup-publish-status.rejected{border-color:#ebc7c3;background:#fff8f7}.setup-publish-status.rejected .setup-publish-icon{background:#f7d9d5;color:#8f342b}
+.setup-publish-status.ready{border-color:#dce6bd;background:#fbfcf7}.schedule-mismatch-notice{display:block;border-color:#ead9aa;background:#fffcf3}
+@media(max-width:560px){.setup-next-action{margin-bottom:10px;padding:13px 14px}.setup-next-action strong{font-size:13px}.setup-publish-status{flex-wrap:wrap;padding:13px}.setup-publish-status>a{margin:0 0 0 38px}.schedule-mismatch-notice{padding:13px}}
