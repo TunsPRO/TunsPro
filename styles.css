@@ -553,6 +553,39 @@
 }
 @media(prefers-reduced-motion:reduce){.booking-continue-bar{scroll-behavior:auto}}
 
+/* Compact seven-day schedule: every day stays visible, tap a row to edit it. */
+.schedule-edit-grid .schedule-compact-day{display:block;min-width:0;padding:0;overflow:hidden;border-radius:12px;background:#fff}
+.schedule-day-summary{width:100%;min-height:50px;display:grid;grid-template-columns:minmax(105px,.7fr) auto minmax(130px,1.3fr) 18px;align-items:center;gap:12px;padding:8px 13px;border:0;background:transparent;color:var(--ink);text-align:left;font:inherit;cursor:pointer}
+.schedule-summary-name{font-size:13px;font-weight:750}
+.schedule-summary-state{justify-self:start;padding:4px 9px;border-radius:999px;font-size:10px;font-weight:750;white-space:nowrap}
+.schedule-summary-state.is-open{background:#eef5d9;color:#667a3c}
+.schedule-summary-state.is-closed{background:#f0f1ed;color:#72776d}
+.schedule-summary-hours{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.schedule-summary-chevron{color:#7d865e;font-size:18px;transition:transform .16s}
+.schedule-day-summary[aria-expanded="true"] .schedule-summary-chevron{transform:rotate(180deg)}
+.schedule-day-summary:hover{background:#fafbf6}
+.schedule-compact-day.is-editing{border-color:#cbd6a6;background:#fff}
+.schedule-day-editor{display:grid;grid-template-columns:minmax(110px,.65fr) minmax(220px,1.35fr) auto;align-items:center;gap:10px 14px;padding:12px 13px;border-top:1px solid var(--line)}
+.schedule-day-editor[hidden]{display:none}
+.schedule-compact-day .schedule-day-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.schedule-compact-day .schedule-day-head small{padding:0}
+.schedule-compact-day .schedule-work-windows{grid-column:2}
+.schedule-compact-day .schedule-day-actions{grid-column:3;display:grid;gap:4px}
+.schedule-compact-day .schedule-pause-times{grid-column:2/4}
+.shop-hours-day .schedule-day-editor{grid-template-columns:minmax(110px,.65fr) minmax(220px,1.35fr)}
+.shop-hours-day .schedule-work-window{grid-column:2}
+@media(max-width:600px){
+ .schedule-edit-grid .schedule-compact-day{border-radius:10px}
+ .schedule-day-summary{grid-template-columns:minmax(82px,.8fr) auto minmax(70px,1fr) 14px;gap:7px;padding:8px 9px;min-height:48px}
+ .schedule-summary-name{font-size:12px}
+ .schedule-summary-state{padding:4px 7px;font-size:9px}
+ .schedule-summary-hours{font-size:11px;text-align:right}
+ .schedule-day-editor,.shop-hours-day .schedule-day-editor{grid-template-columns:1fr;gap:9px;padding:10px}
+ .schedule-compact-day .schedule-work-windows,.schedule-compact-day .schedule-day-actions,.schedule-compact-day .schedule-pause-times,.shop-hours-day .schedule-work-window{grid-column:1}
+ .schedule-compact-day .schedule-day-actions{display:flex;flex-wrap:wrap}
+ .schedule-compact-day .schedule-pause-times{grid-column:1}
+}
+
 .booking-continue-button:disabled{opacity:.58;cursor:not-allowed}
 
 /* Mobile booking cards: keep service icons and text in separate, predictable columns. */
