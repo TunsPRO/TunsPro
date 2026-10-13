@@ -85,6 +85,14 @@
     document.head.appendChild(script);
   }
 
+  function addConsentStyles() {
+    if (document.getElementById('tunspro-consent-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'tunspro-consent-styles';
+    style.textContent = '.tunspro-consent{position:fixed;z-index:10000;left:24px;right:24px;bottom:24px;max-width:860px;margin:auto;padding:22px 24px;background:#171916;color:#fff;border:1px solid #45483e;border-radius:18px;box-shadow:0 18px 60px #0005;display:flex;align-items:center;justify-content:space-between;gap:24px;font:14px/1.55 "DM Sans",sans-serif}.tunspro-consent[hidden]{display:none}.tunspro-consent-copy{display:flex;align-items:flex-start;gap:14px;min-width:0}.tunspro-consent-mark{width:38px;height:38px;flex:none;display:grid;place-items:center;border-radius:12px;background:#d7f16b;color:#171916;font-weight:800;font-size:18px}.tunspro-consent h2{margin:0 0 5px;font:700 17px/1.3 Manrope,sans-serif;letter-spacing:-.02em;color:#fff}.tunspro-consent p{margin:0 0 5px;color:#d0d1cb;font-size:13px}.tunspro-consent a{color:#d7f16b;text-decoration:underline;text-underline-offset:2px}.tunspro-consent-actions{display:flex;flex:none;gap:9px}.tunspro-consent-actions button,.tunspro-cookie-settings{min-height:42px;border:1px solid #606356;border-radius:10px;padding:10px 14px;font:700 12px "DM Sans",sans-serif;cursor:pointer}.tunspro-consent-secondary{background:transparent;color:#fff}.tunspro-consent-primary{background:#d7f16b;color:#171916;border-color:#d7f16b}.tunspro-cookie-settings{position:fixed;z-index:9998;left:14px;bottom:14px;min-height:36px;padding:8px 12px;background:#171916;color:#fff;border-color:#45483e;box-shadow:0 5px 20px #0002}.tunspro-consent:not([hidden])~.tunspro-cookie-settings{visibility:hidden}.legal-page #analytics-privacy-section{margin-top:28px;padding:22px;background:#fff;border:1px solid #e8e9e4;border-radius:14px}.legal-page #analytics-privacy-section h2{margin-top:0}.legal-page #analytics-privacy-section p{line-height:1.7}@media(max-width:700px){.tunspro-consent{left:12px;right:12px;bottom:12px;padding:17px;display:block;border-radius:16px}.tunspro-consent-copy{gap:10px}.tunspro-consent-mark{width:32px;height:32px;border-radius:10px}.tunspro-consent h2{font-size:15px}.tunspro-consent p{font-size:12px}.tunspro-consent-actions{display:grid;grid-template-columns:1fr 1fr;margin-top:14px}.tunspro-consent-actions button{padding:9px 7px;font-size:11px}.tunspro-cookie-settings{left:auto;right:12px;bottom:12px}.legal-page #analytics-privacy-section{padding:17px}}';
+    document.head.appendChild(style);
+  }
+
   function showConsentDialog() {
     let dialog = document.getElementById('tunspro-consent');
     if (!dialog) {
@@ -175,6 +183,7 @@
   }
 
   function init() {
+    addConsentStyles();
     addSettingsButton();
     observePrivacyPage();
     installApiObserver();
