@@ -4,6 +4,7 @@
   const CONSENT_KEY = 'tunspro-analytics-consent-v1';
   let analyticsReady = false;
   let scriptLoading = false;
+  let gtagLoaded = false;
   let routeObserverStarted = false;
 
   const allowedRoutes = () => {
@@ -50,6 +51,12 @@
 
   function loadAnalytics() {
     if (analyticsReady || scriptLoading || consentValue() !== 'accepted') return;
+    if (gtagLoaded) {
+      gtag('consent', 'update', { analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied' });
+      analyticsReady = true;
+      sendPageView();
+      return;
+    }
     scriptLoading = true;
     window.dataLayer = window.dataLayer || [];
     window.gtag = window.gtag || function(){ window.dataLayer.push(arguments); };
@@ -58,9 +65,13 @@
     script.async = true;
     script.src = 'https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(MEASUREMENT_ID);
     script.onload = () => {
+      scriptLoading = false;
+      gtagLoaded = true;
       gtag('js', new Date());
-      gtag('consent', 'update', { analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied' });
+      const accepted = consentValue() === 'accepted';
+      gtag('consent', 'update', { analytics_storage: accepted ? 'granted' : 'denied', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied' });
       gtag('config', MEASUREMENT_ID, { send_page_view: false, allow_google_signals: false, allow_ad_personalization_signals: false });
+      if (!accepted) return;
       const campaign = {
         campaign_source: safeCampaignValue('utm_source'),
         campaign_medium: safeCampaignValue('utm_medium'),
