@@ -583,11 +583,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Referrer-Policy','strict-origin-when-cross-origin')
         self.send_header('Permissions-Policy','camera=(), microphone=(), geolocation=()')
         nonce=getattr(self,'csp_nonce','')
-        script_src="script-src 'self' https://cdnjs.cloudflare.com"+(f" 'nonce-{nonce}'" if nonce else '')
+        script_src="script-src 'self' https://cdnjs.cloudflare.com https://www.googletagmanager.com"+(f" 'nonce-{nonce}'" if nonce else '')
         csp=("default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; "
              +script_src+"; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; "
              +"font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data: blob:; "
-             +"connect-src 'self'; frame-src 'self'; manifest-src 'self'; worker-src 'self' blob:; upgrade-insecure-requests")
+             +"connect-src 'self' https://www.google-analytics.com https://region1.google-analytics.com; frame-src 'self'; manifest-src 'self'; worker-src 'self' blob:; upgrade-insecure-requests")
         self.send_header('Content-Security-Policy',csp)
         if os.environ.get('COOKIE_SECURE','0')=='1':self.send_header('Strict-Transport-Security','max-age=31536000')
         super().end_headers()
@@ -1011,7 +1011,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         team_data.append(item)
                     return self.json_response(200,{'shop':shop_data,'services':[dict(x) for x in svc],'team':team_data,'bookings':booking_data,'subscription':{'active':paid,'status':sub['status'],'plan':sub['plan'],'paid_until':sub['paid_until'],'grace_days':SUBSCRIPTION_GRACE_DAYS},'notifications':dict(settings) if settings else {},'notification_delivery':{'email_configured':email_configured(),'sms_configured':sms_configured()}})
         if path.startswith('/api/'): return self.json_response(404,{'error':'Nu am găsit pagina.'})
-        if path not in ('/','/index.html','/client.js','/features.js','/styles.css','/robots.txt','/sitemap.xml','/assets/home-barber-editorial.png','/assets/romania-localities.json','/assets/tunspro-mark.png'):return self.send_error(404)
+        if path not in ('/','/index.html','/client.js','/features.js','/analytics.js','/styles.css','/robots.txt','/sitemap.xml','/assets/home-barber-editorial.png','/assets/romania-localities.json','/assets/tunspro-mark.png'):return self.send_error(404)
         return super().do_GET()
     def do_GET(self):
         try:
