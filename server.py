@@ -582,6 +582,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('X-Frame-Options','DENY')
         self.send_header('Referrer-Policy','strict-origin-when-cross-origin')
         self.send_header('Permissions-Policy','camera=(), microphone=(), geolocation=()')
+        nonce=getattr(self,'csp_nonce','')
+        script_src="script-src 'self' https://cdnjs.cloudflare.com"+(f" 'nonce-{nonce}'" if nonce else '')
+        csp=("default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; "
+             +script_src+"; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; "
+             +"font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data: blob:; "
+             +"connect-src 'self'; frame-src 'self'; manifest-src 'self'; worker-src 'self' blob:; upgrade-insecure-requests")
+        self.send_header('Content-Security-Policy',csp)
         if os.environ.get('COOKIE_SECURE','0')=='1':self.send_header('Strict-Transport-Security','max-age=31536000')
         super().end_headers()
     def json_response(self, status, payload, extra=None):
@@ -706,7 +713,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             ld=json.dumps(item_list,ensure_ascii=False).replace('</','<\\/')
             page=re.sub(r'<script type="application/ld\+json">.*?</script>',f'<script type="application/ld+json">{ld}</script>',page,count=1,flags=re.S)
             page=page.replace('<div id="app"></div>',f'<div id="app">{fallback}</div>',1)
-            bootstrap="<script>if(location.pathname==='/frizerii'&&!location.hash)location.hash='cauta';</script>"
+            self.csp_nonce=secrets.token_urlsafe(18)
+            bootstrap=f'<script nonce="{self.csp_nonce}">if(location.pathname==="/frizerii"&&!location.hash)location.hash="cauta";</script>'
             page=page.replace('<script src="client.js?',bootstrap+'<script src="client.js?',1)
             body=page.encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','public, max-age=300');self.end_headers();self.wfile.write(body);return
         profile_match=re.fullmatch(r'/frizerie/([a-zA-Z0-9-]{1,100})/?',path)
@@ -731,11 +739,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             page=page.replace('<meta property="og:title" content="TunsPro — găsește și rezervă la frizerii din România">',f'<meta property="og:title" content="{html_escape(title,quote=True)}">',1)
             page=page.replace('<meta property="og:description" content="Descoperă frizerii, compară servicii și prețuri și rezervă online, simplu și fără cont de client.">',f'<meta property="og:description" content="{html_escape(description,quote=True)}">',1)
             page=page.replace('<meta property="og:url" content="https://tunspro.ro/">',f'<meta property="og:url" content="{html_escape(canonical,quote=True)}">',1)
+            shop_image=next((url for url in (public_image_url(x) for x in public.get('photos',[])) if url),'')
+            default_share_image='https://tunspro.ro/assets/home-barber-editorial.png?v=20261013-og-preview1'
+            share_image=shop_image or default_share_image
+            page=page.replace(default_share_image,html_escape(share_image,quote=True))
+            if shop_image:
+                page=page.replace('Un barber tunde un client într-o frizerie modernă, imagine TunsPro.',html_escape(f"Fotografie din profilul {public['name']} pe TunsPro.",quote=True),1)
             page=page.replace('<meta name="twitter:title" content="TunsPro — programări simple la frizerii">',f'<meta name="twitter:title" content="{html_escape(title,quote=True)}">',1)
             page=page.replace('<meta name="twitter:description" content="Descoperă frizerii și rezervă online fără cont de client.">',f'<meta name="twitter:description" content="{html_escape(description,quote=True)}">',1)
             page=page.replace('<title>TunsPro — Programări fără telefoane</title>',f'<title>{html_escape(title)}</title>',1)
             schema={'@context':'https://schema.org','@type':'HairSalon','name':public['name'],'url':canonical,'description':description,'telephone':public['phone'],'address':{'@type':'PostalAddress','streetAddress':public['address'],'addressLocality':public['city'],'addressCountry':'RO'},'inLanguage':'ro-RO'}
-            shop_image=next((url for url in (public_image_url(x) for x in public.get('photos',[])) if url),'')
             if shop_image:schema['image']=shop_image
             try:
                 hours_specs=opening_hours_specs(public.get('public_hours',{}))
