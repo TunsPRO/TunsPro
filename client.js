@@ -106,7 +106,7 @@ app.addEventListener('submit',async e=>{
         schedule[String(day)]=[start,end];
       }
       await api('/api/manage/shop-hours',{method:'PUT',body:JSON.stringify({schedule})});
-      dash=await api('/api/manage/dashboard');app.innerHTML=await dashboardPage('dashboard-hours');toast('Programul general al frizeriei a fost salvat.');return;
+      dash=await api('/api/manage/dashboard');toast('Programul general a fost salvat și marcat ca finalizat. Continuă cu programul individual din pagina de prezentare.');location.hash='dashboard';return;
     }
     if(form.matches('.schedule-form')){
       const {schedule,breaks}=schedulePayload(form);
@@ -115,7 +115,7 @@ app.addEventListener('submit',async e=>{
       const affected=affectedBookings(staffId,schedule,breaks);if(affected.length&&!confirm(`${affected.length} programări viitoare cad în afara noului program sau într-o pauză. Ele vor rămâne în agendă și nu vor fi șterse, dar intervalele afectate nu vor mai putea primi rezervări noi. Continui?`))return;
       const team=dash.team.map(t=>Number(t.id)===staffId?{...t,weekly_schedule:schedule,weekly_breaks:breaks,slot_interval:slotInterval}:t);
       await api('/api/manage/team',{method:'PUT',body:JSON.stringify({team})});
-      dash=await api('/api/manage/dashboard');app.innerHTML=await dashboardPage('dashboard-hours');toast(`Programul a fost salvat. Clienții pot rezerva la fiecare ${slotInterval} de minute. Rezervările existente au rămas în agendă.`);return;
+      dash=await api('/api/manage/dashboard');toast('Programul individual a fost salvat și marcat ca finalizat. Revino la prezentare pentru a vedea progresul și pasul următor.');location.hash='dashboard';return;
     }
     if(data.kind==='day_off')data.end_date=data.start_date;
     if(data.kind==='break'&&data.start_date!==data.end_date)throw new Error('Pauza punctuală trebuie să fie într-o singură zi.');
